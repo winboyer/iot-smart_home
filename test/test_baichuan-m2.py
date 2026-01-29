@@ -1,7 +1,12 @@
 # 1. load model
 from transformers import AutoTokenizer, AutoModelForCausalLM
-model = AutoModelForCausalLM.from_pretrained("baichuan-inc/Baichuan-M2-32B", trust_remote_code=True)
-tokenizer = AutoTokenizer.from_pretrained("baichuan-inc/Baichuan-M2-32B")
+# from modelscope import AutoTokenizer, AutoModelForCausalLM
+import os
+os.environ['CUDA_VISIBLE_DEVICES'] = '0, 1'
+
+model_path = "/home/jinyfeng/models/Baichuan/Baichuan-M2-32B"
+model = AutoModelForCausalLM.from_pretrained(model_path, trust_remote_code=True)
+tokenizer = AutoTokenizer.from_pretrained(model_path, device_map="auto")
 # 2. Input prompt text
 prompt = "Got a big swelling after a bug bite. Need help reducing it."
 # 3. Encode the input text for the model
