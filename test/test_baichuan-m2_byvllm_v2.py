@@ -5,12 +5,13 @@ from openai import OpenAI
 
 
 class LLMProvider:
-    def __init__(self, api_key: str, model: str, base_url: str):
+    def __init__(self, api_key: str, model: str, base_url: str, max_tokens=8192):
         self.model = model
         self.client = OpenAI(
             base_url=base_url,
             api_key=api_key
         )
+        self.max_tokens = max_tokens
 
     def chat_stream(self, messages: list[dict], 
                     system_prompt: Optional[str]=None) -> Iterator[str]:
@@ -25,15 +26,9 @@ class LLMProvider:
                 messages = full_messages,
                 stream = True,
                 temperature = 0.7,
-                top_p = 0.9
+                top_p = 0.9,
+                max_tokens = self.max_tokens
             )
-            # payload = {
-            #     "model": model,
-            #     "prompt": prompt,
-            #     "max_tokens": max_tokens,
-            #     "temperature": 0.7,
-            #     "top_p": 0.9
-            # }
             for chunk in stream:
                 if chunk.choices[0].delta.content:
                     # print(chunk.choices[0].delta.content, end="", flush=True)
@@ -199,6 +194,7 @@ def query_vllm_service(prompt: str,
     
     # try:
     #     response = requests.post(url, json=payload, headers=headers)
+    #     response = requests.request("POST", url, headers=headers, data=payload)
     #     response.raise_for_status()
     #     result = response.json()
     #     print(result["choices"][0]["text"])
