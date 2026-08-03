@@ -1,17 +1,124 @@
-import requests
 import json
+from dataclasses import dataclass, field
+from enum import Enum
 from typing import Iterator, Optional
 from openai import OpenAI
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+import uvicorn
 
+
+# ---------------------------------------------------------------------------
+# 请求类型枚举
+# ---------------------------------------------------------------------------
+
+class AnalysisType(str, Enum):
+    SLEEP_PHYSIOLOGY = "sleep_physiology"   # 睡眠与生理分析
+    BLOOD_ANALYSIS   = "blood_analysis"     # 血液指标分析
+    EXAM_REPORT      = "exam_report"        # 综合体检报告
+
+
+# ---------------------------------------------------------------------------
+# JSON 数据结构模型
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SleepRecord:
+    """单日睡眠记录，对应 sleepSummary.sleepRecords[] 中的一条"""
+    date: str
+    hasValidSleepReport: bool
+    bedTime: Optional[str] = None
+    wakeUpTime: Optional[str] = None
+    sleepDurationHours: Optional[float] = None
+    sleepOnsetLatencyMinutes: Optional[int] = None
+    sleepEfficiency: Optional[float] = None
+    sleepScore: Optional[float] = None
+    physiologicalScore: Optional[float] = None
+    deepSleepHours: Optional[float] = None
+    lightSleepHours: Optional[float] = None
+    remSleepHours: Optional[float] = None
+    awakeDurationMinutes: Optional[int] = None
+    outBedCount: Optional[float] = None
+    outBedDurationMinutes: Optional[float] = None
+    apnoeaCount: Optional[int] = None
+    averageHeartRate: Optional[float] = None
+    minHeartRate: Optional[float] = None
+    maxHeartRate: Optional[float] = None
+    heartRateAlarmCount: Optional[int] = None
+    averageBreathingRate: Optional[float] = None
+    minBreathingRate: Optional[float] = None
+    maxBreathingRate: Optional[float] = None
+    breathingAlarmCount: Optional[int] = None
+
+
+@dataclass
+class SleepSummary:
+    """sleepSummary 对象"""
+    reportDays: int
+    validReportDays: int
+    noReportDays: int
+    hasSleepRecords: bool
+    sleepRecords: list[SleepRecord] = field(default_factory=list)
+
+
+@dataclass
+class HealthCheckRecord:
+    """单次体检记录，对应 healthCheckRecords[] 中的一条"""
+    type: str
+    upTime: str
+    createTime: str
+    bloodGlucose: Optional[str] = None   # 血糖 mmol/L
+    uricAcid: Optional[str] = None       # 尿酸 μmol/L
+    pressureS: Optional[str] = None      # 收缩压 mmHg
+    pressureD: Optional[str] = None      # 舒张压 mmHg
+    pressureRate: Optional[str] = None   # 心率 bpm
+    bloodfatTc: Optional[str] = None     # 总胆固醇 mmol/L
+    bloodfatHdl: Optional[str] = None    # HDL mmol/L
+    bloodfatTg: Optional[str] = None     # 甘油三酯 mmol/L
+    bloodfatLdl: Optional[str] = None    # LDL mmol/L
+
+
+@dataclass
+class AnalysisRequest:
+    """统一分析请求，包含请求类型和 JSON 原始数据"""
+    analysis_type: AnalysisType
+    healthCheckRecords: list[HealthCheckRecord] = field(default_factory=list)
+    sleepSummary: Optional[SleepSummary] = None
+
+    @classmethod
+    def from_json(cls, analysis_type: AnalysisType, data: dict) -> "AnalysisRequest":
+        """从接口传入的 JSON dict 构建请求对象"""
+        sleep_summary = None
+        if "sleepSummary" in data:
+            ss = data["sleepSummary"]
+            sleep_records = [SleepRecord(**r) for r in ss.get("sleepRecords", [])]
+            sleep_summary = SleepSummary(
+                reportDays=ss.get("reportDays", 0),
+                validReportDays=ss.get("validReportDays", 0),
+                noReportDays=ss.get("noReportDays", 0),
+                hasSleepRecords=ss.get("hasSleepRecords", False),
+                sleepRecords=sleep_records,
+            )
+        health_records = [HealthCheckRecord(**r) for r in data.get("healthCheckRecords", [])]
+        return cls(
+            analysis_type=analysis_type,
+            healthCheckRecords=health_records,
+            sleepSummary=sleep_summary,
+        )
+
+
+# ---------------------------------------------------------------------------
+# LLM 提供者
+# ---------------------------------------------------------------------------
 
 class LLMProvider:
-    def __init__(self, api_key: str, model: str, base_url: str, max_tokens=8192):
+    def __init__(self, api_key: str, model: str, base_url: str):
         self.model = model
         self.client = OpenAI(
             base_url=base_url,
             api_key=api_key
         )
-        self.max_tokens = max_tokens
 
     def chat_stream(self, messages: list[dict], 
                     system_prompt: Optional[str]=None) -> Iterator[str]:
@@ -26,17 +133,19 @@ class LLMProvider:
                 messages = full_messages,
                 stream = True,
                 temperature = 0.7,
-                top_p = 0.9,
-                max_tokens = self.max_tokens
+                top_p = 0.9
             )
             for chunk in stream:
-                if chunk.choices[0].delta.content:
-                    # print(chunk.choices[0].delta.content, end="", flush=True)
+                if chunk.choices and chunk.choices[0].delta.content:
                     yield chunk.choices[0].delta.content
     
         except Exception as e:
             yield f"\n LLM 错误: {e}\n"
 
+
+# ---------------------------------------------------------------------------
+# 健康助手
+# ---------------------------------------------------------------------------
 
 class HealthAssistant:
     def __init__(self, provider: LLMProvider, system_prompt: Optional[str] = None):
@@ -251,71 +360,76 @@ class HealthAssistant:
 
 
 # ---------------------------------------------------------------------------
-# 测试入口
+# FastAPI 服务
 # ---------------------------------------------------------------------------
 
+# 全局初始化
+API_KEY    = "none"
+MODEL_PATH = "/home/jinyfeng/models/Baichuan/Baichuan-M2-32B"
+BASE_URL   = "http://127.0.0.1:2602/v1"
+
+provider  = LLMProvider(api_key=API_KEY, model=MODEL_PATH, base_url=BASE_URL)
+assistant = HealthAssistant(provider=provider)
+
+app = FastAPI(title="Health Analysis LLM Service")
+
+
+class HealthDataRequest(BaseModel):
+    """接口请求体：分析类型 + 原始健康 JSON 数据"""
+    analysis_type: AnalysisType
+    healthCheckRecords: list[dict] = []
+    sleepSummary: Optional[dict] = None
+
+
+@app.post("/v1/analyze")
+async def analyze(request: HealthDataRequest):
+    """阻塞式分析接口，返回完整分析结果"""
+    try:
+        data = {"healthCheckRecords": request.healthCheckRecords}
+        if request.sleepSummary is not None:
+            data["sleepSummary"] = request.sleepSummary
+        req = AnalysisRequest.from_json(request.analysis_type, data)
+        response_text = ""
+        for chunk in assistant.analyze_stream(req):
+            response_text += chunk
+        return {"analysis_type": request.analysis_type, "response": response_text}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/v1/analyze/stream")
+async def analyze_stream(request: HealthDataRequest):
+    """流式分析接口 (SSE)"""
+    data = {"healthCheckRecords": request.healthCheckRecords}
+    if request.sleepSummary is not None:
+        data["sleepSummary"] = request.sleepSummary
+    req = AnalysisRequest.from_json(request.analysis_type, data)
+    return StreamingResponse(
+        assistant.analyze_stream(req),
+        media_type="text/event-stream"
+    )
+
+
+@app.post("/v1/chat")
+async def chat(question: str):
+    """通用问答阻塞式接口"""
+    try:
+        response_text = ""
+        for chunk in assistant.chat_stream(question):
+            response_text += chunk
+        return {"response": response_text}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/v1/chat/stream")
+async def chat_stream(question: str):
+    """通用问答流式接口 (SSE)"""
+    return StreamingResponse(
+        assistant.chat_stream(question),
+        media_type="text/event-stream"
+    )
+
+
 if __name__ == "__main__":
-    import os
-
-    api_key    = "none"
-    model_path = "/home/jinyfeng/models/Baichuan/Baichuan-M2-32B"
-    url        = "http://127.0.0.1:2602/v1"
-
-    provider      = LLMProvider(api_key=api_key, model=model_path, base_url=url)
-    llm_assistant = HealthAssistant(provider=provider)
-
-    # 读取样例 JSON 数据
-    sample_path = os.path.join(os.path.dirname(__file__), "..", "guard_ai_upload_one_week_sample.json")
-    with open(sample_path, "r", encoding="utf-8") as f:
-        sample_data = json.load(f)
-
-    for chunk in llm_assistant.chat_stream(question=question):
-        # print(chunk)
-        print(chunk, end="", flush=True)
-
-    
-    # response = query_vllm_service(prompt)
-    # print(response)
-
-    
-            
-    
-
-def query_vllm_service(prompt: str, 
-                       model: str = "/home/jinyfeng/models/Baichuan/Baichuan-M2-32B", 
-                       max_tokens: int = 1024):
-    """
-    Query a vLLM deployed service
-    
-    Args:
-        prompt: Input prompt text
-        model: Model name
-        max_tokens: Maximum tokens to generate
-    
-    Returns:
-        Generated text response
-    """
-
-    url = "http://127.0.0.1:2602/v1"
-    # url = "http://127.0.0.1:2602/v1/completions"
-
-    client = OpenAI(base_url=url, api_key="none")
-    stream = client.chat.completions.create(
-        model = model,
-        messages = [{"role": "user", "content": prompt}],
-        stream = True,
-
-    )    
-    return stream
-    
-    
-    # try:
-    #     response = requests.post(url, json=payload, headers=headers)
-    #     response = requests.request("POST", url, headers=headers, data=payload)
-    #     response.raise_for_status()
-    #     result = response.json()
-    #     print(result["choices"][0]["text"])
-    #     return result["choices"][0]["text"]
-    # except requests.exceptions.RequestException as e:
-    #     print(f"Error: {e}")
-    #     return None
+    uvicorn.run(app, host="0.0.0.0", port=26021)
