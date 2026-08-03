@@ -1474,4 +1474,4 @@ if __name__ == "__main__":
     print(f"已加载 {len(data_loader.persons)} 条人员信息")
     print(f"已加载 {sum(len(v) for v in data_loader.wristband.values())} 条手环数据")
     print(f"已加载 {sum(len(v) for v in data_loader.sleep_cache.values())} 条睡眠数据")
-    uvicorn.run(app, host="0.0.0.0", port=26022)
+    uvicorn.run(app, host="0.0.0.0", port=8006)
