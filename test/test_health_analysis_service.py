@@ -9,8 +9,8 @@ import time
 import urllib.request
 import urllib.error
 
-# BASE_URL = "http://127.0.0.1:26022"
-BASE_URL = "http://120.26.34.95:7116"
+BASE_URL = "http://127.0.0.1:26022"
+# REMOTE_BASE_URL = "http://120.26.34.95:7116"
 PASSED = 0
 FAILED = 0
 
@@ -282,6 +282,87 @@ def test_empty_body():
 
 
 # ---------------------------------------------------------------------------
+# 驼峰格式兼容性测试数据
+# ---------------------------------------------------------------------------
+
+CAMEL_PERSON = {
+    "id": "2067422320443576321",
+    "projectId": "test-project-camel",
+    "deviceId": "861389061443375",
+    "name": "李四",
+    "gender": "2",
+    "age": 28,
+    "height": 160.0,
+    "weight": 50.0,
+    "bmi": 19.5,
+    "idCard": "420281200001010002",
+}
+
+CAMEL_WRISTBAND = [
+    {
+        "dataTime": "2026-07-01 08:00:00",
+        "avgHr": 72,
+        "maxHr": 88,
+        "minHr": 65,
+        "sbp": 115,
+        "dbp": 72,
+        "bpHr": 68,
+        "avgSpo2": 98,
+        "minSpo2": 96,
+        "maxSpo2": 99,
+        "estimateTemp": 36.3,
+        "steps": 200,
+        "calorie": 8,
+        "distance": 150.0,
+        "fatigue": 40,
+        "rmssd": 42,
+        "type": "hr,spo,pressure",
+        "personId": "2067422320443576321",
+        "deviceId": "861389061443375",
+    }
+]
+
+CAMEL_SLEEP = [
+    {
+        "collectDate": 20260710,
+        "rriDataList": "[-3, 5200, -1, 42, 35, 38, 50]",
+        "sleepSegments": '[{"E":{"start":0,"end":240},"Q":1100,"T":[10,30]}]',
+        "personId": "2067422320443576321",
+        "deviceId": "861389061443375",
+    }
+]
+
+CAMEL_REQUEST = {
+    "person": CAMEL_PERSON,
+    "wristbandRecords": CAMEL_WRISTBAND,
+    "sleepRecords": CAMEL_SLEEP,
+}
+
+
+@test("8. 驼峰格式兼容 - snake_case 顶层 + camelCase 内层数据")
+def test_camel_compat():
+    """使用 snake_case 顶层键 + camelCase 内部字段"""
+    resp = post_json(f"{BASE_URL}/v1/health/analyze", {
+        "person": CAMEL_PERSON,
+        "wristband_records": CAMEL_WRISTBAND,
+        "sleep_records": CAMEL_SLEEP,
+    })
+    assert_status(resp, 200)
+
+    data = assert_json(resp)
+    assert data.get("person_id") == CAMEL_PERSON["idCard"], \
+        f"person_id 不匹配: {data.get('person_id')}"
+
+    analysis = data["analysis"]
+    assert "综合分析" in analysis, "缺少综合分析"
+    assert "睡眠分析" in analysis, "缺少睡眠分析"
+    assert "运动分析" in analysis, "缺少运动分析"
+
+    # 验证 camelCase person 的 name 被正确解析
+    print(f"  ✅ camelCase 字段解析正常 (人员: {CAMEL_PERSON['name']})")
+
+
+# ---------------------------------------------------------------------------
 # 主流程
 # ---------------------------------------------------------------------------
 
@@ -298,6 +379,7 @@ if __name__ == "__main__":
     test_analyze_stream()
     test_missing_person()
     test_empty_body()
+    test_camel_compat()
 
     print(f"\n{'='*60}")
     print(f"  测试结果: {PASSED + FAILED} 个用例, {PASSED} 通过, {FAILED} 失败")

@@ -1254,6 +1254,79 @@ def get_provider() -> LLMProvider:
     return llm_providers[backend]
 
 
+# ---------------------------------------------------------------------------
+# 字段兼容工具：同时支持 snake_case 和 camelCase
+# ---------------------------------------------------------------------------
+
+def _get(data: dict, *keys: str, default=None):
+    """从字典中按优先级获取字段，兼容 snake_case / camelCase"""
+    for k in keys:
+        if k in data and data[k] is not None:
+            return data[k]
+    return default
+
+
+def _parse_person(raw: dict) -> PersonInfo:
+    """解析人员信息，兼容驼峰与下划线字段"""
+    return PersonInfo(
+        id=_get(raw, "id", default=""),
+        project_id=_get(raw, "project_id", "projectId", default=""),
+        device_id=_get(raw, "device_id", "deviceId", default=""),
+        name=_get(raw, "name", default=""),
+        gender=str(_get(raw, "gender", default="")),
+        age=int(_get(raw, "age", default=0) or 0),
+        height=float(_get(raw, "height", default=0) or 0),
+        weight=float(_get(raw, "weight", default=0) or 0),
+        bmi=float(_get(raw, "bmi", default=0) or 0),
+        id_card=_get(raw, "id_card", "idCard", default=""),
+        phone=_get(raw, "phone", default=""),
+        status=str(_get(raw, "status", default="")),
+    )
+
+
+def _parse_wristband(raw: dict) -> WristbandRecord:
+    """解析手环记录，兼容驼峰与下划线字段"""
+    distance_raw = _get(raw, "distance")
+    temp_raw = _get(raw, "estimate_temp", "estimateTemp")
+    return WristbandRecord(
+        id=_get(raw, "id", default=""),
+        history_type=_get(raw, "history_type", "historyType", default=""),
+        seq=_get(raw, "seq", default=0),
+        data_time=_get(raw, "data_time", "dataTime", default=""),
+        avg_hr=_get(raw, "avg_hr", "avgHr"),
+        max_hr=_get(raw, "max_hr", "maxHr"),
+        min_hr=_get(raw, "min_hr", "minHr"),
+        fatigue=_get(raw, "fatigue"),
+        rmssd=_get(raw, "rmssd"),
+        bp_hr=_get(raw, "bp_hr", "bpHr"),
+        sbp=_get(raw, "sbp"),
+        dbp=_get(raw, "dbp"),
+        avg_spo2=_get(raw, "avg_spo2", "avgSpo2"),
+        min_spo2=_get(raw, "min_spo2", "minSpo2"),
+        max_spo2=_get(raw, "max_spo2", "maxSpo2"),
+        calorie=_get(raw, "calorie"),
+        steps=_get(raw, "steps"),
+        distance=float(distance_raw) if distance_raw is not None else None,
+        estimate_temp=float(temp_raw) if temp_raw is not None else None,
+        type=_get(raw, "type", default=""),
+        person_id=_get(raw, "person_id", "personId", default=""),
+        device_id=_get(raw, "device_id", "deviceId", default=""),
+    )
+
+
+def _parse_sleep(raw: dict) -> SleepCacheRecord:
+    """解析睡眠记录，兼容驼峰与下划线字段"""
+    return SleepCacheRecord(
+        id=_get(raw, "id", default=""),
+        person_id=_get(raw, "person_id", "personId", default=""),
+        device_id=_get(raw, "device_id", "deviceId", default=""),
+        collect_date=_get(raw, "collect_date", "collectDate", default=0),
+        rri_data_list=_get(raw, "rri_data_list", "rriDataList", default=""),
+        sleep_segments=_get(raw, "sleep_segments", "sleepSegments", default=""),
+        create_time=_get(raw, "create_time", "createTime", default=""),
+    )
+
+
 class HealthAnalysisRequest(BaseModel):
     """健康分析请求体——直接传入数据库表数据，LLM 模型由服务启动配置决定"""
     person: dict = Field(..., description="biz_person 表数据，单条 JSON 对象")
@@ -1271,65 +1344,16 @@ async def health_analyze(request: HealthAnalysisRequest):
     统一健康分析接口，返回 7 个维度的分析结果。
     请求体直接传入 biz_person / biz_wristband_cache / biz_sleep_cache 三张表的数据。
     """
-    # 解析请求中的 person 数据
-    person_raw = request.person
-    person = PersonInfo(
-        id=person_raw.get("id", ""),
-        project_id=person_raw.get("project_id", ""),
-        device_id=person_raw.get("device_id", ""),
-        name=person_raw.get("name", ""),
-        gender=str(person_raw.get("gender", "")),
-        age=int(person_raw.get("age", 0) or 0),
-        height=float(person_raw.get("height", 0) or 0),
-        weight=float(person_raw.get("weight", 0) or 0),
-        bmi=float(person_raw.get("bmi", 0) or 0),
-        id_card=person_raw.get("id_card", ""),
-        phone=person_raw.get("phone", ""),
-        status=str(person_raw.get("status", "")),
+    # 解析请求数据（兼容 snake_case / camelCase）
+    person = _parse_person(request.person)
+    wristband_records = sorted(
+        [_parse_wristband(item) for item in (request.wristband_records or [])],
+        key=lambda x: x.data_time,
     )
-
-    # 解析手环数据（可能为空）
-    wristband_records = []
-    for item in (request.wristband_records or []):
-        wristband_records.append(WristbandRecord(
-            id=item.get("id", ""),
-            history_type=item.get("history_type", ""),
-            seq=item.get("seq", 0),
-            data_time=item.get("data_time", ""),
-            avg_hr=item.get("avg_hr"),
-            max_hr=item.get("max_hr"),
-            min_hr=item.get("min_hr"),
-            fatigue=item.get("fatigue"),
-            rmssd=item.get("rmssd"),
-            bp_hr=item.get("bp_hr"),
-            sbp=item.get("sbp"),
-            dbp=item.get("dbp"),
-            avg_spo2=item.get("avg_spo2"),
-            min_spo2=item.get("min_spo2"),
-            max_spo2=item.get("max_spo2"),
-            calorie=item.get("calorie"),
-            steps=item.get("steps"),
-            distance=float(item["distance"]) if item.get("distance") is not None else None,
-            estimate_temp=float(item["estimate_temp"]) if item.get("estimate_temp") is not None else None,
-            type=item.get("type", ""),
-            person_id=item.get("person_id", ""),
-            device_id=item.get("device_id", ""),
-        ))
-    wristband_records.sort(key=lambda x: x.data_time)
-
-    # 解析睡眠数据（可能为空）
-    sleep_records = []
-    for item in (request.sleep_records or []):
-        sleep_records.append(SleepCacheRecord(
-            id=item.get("id", ""),
-            person_id=item.get("person_id", ""),
-            device_id=item.get("device_id", ""),
-            collect_date=item.get("collect_date", 0),
-            rri_data_list=item.get("rri_data_list", ""),
-            sleep_segments=item.get("sleep_segments", ""),
-            create_time=item.get("create_time", ""),
-        ))
-    sleep_records.sort(key=lambda x: x.collect_date)
+    sleep_records = sorted(
+        [_parse_sleep(item) for item in (request.sleep_records or [])],
+        key=lambda x: x.collect_date,
+    )
 
     # 确定报告周期
     if wristband_records:
@@ -1347,13 +1371,10 @@ async def health_analyze(request: HealthAnalysisRequest):
     else:
         report_period = "暂无监测数据"
 
-    # 获取 LLM 提供者
+    # 获取 LLM 提供者并执行分析
     provider = get_provider()
-
-    # 创建分析助手
     assistant = HealthAnalysisAssistant(provider, person)
 
-    # 执行分析
     try:
         result = await asyncio.to_thread(
             assistant.analyze_all,
@@ -1377,51 +1398,16 @@ async def health_analyze(request: HealthAnalysisRequest):
 async def health_analyze_stream(request: HealthAnalysisRequest):
     """流式健康分析接口 (SSE)"""
 
-    # 解析 person
-    person_raw = request.person
-    person = PersonInfo(
-        id=person_raw.get("id", ""),
-        project_id=person_raw.get("project_id", ""),
-        device_id=person_raw.get("device_id", ""),
-        name=person_raw.get("name", ""),
-        gender=str(person_raw.get("gender", "")),
-        age=int(person_raw.get("age", 0) or 0),
-        height=float(person_raw.get("height", 0) or 0),
-        weight=float(person_raw.get("weight", 0) or 0),
-        bmi=float(person_raw.get("bmi", 0) or 0),
-        id_card=person_raw.get("id_card", ""),
-        phone=person_raw.get("phone", ""),
-        status=str(person_raw.get("status", "")),
+    # 解析请求数据（兼容 snake_case / camelCase）
+    person = _parse_person(request.person)
+    wristband_records = sorted(
+        [_parse_wristband(item) for item in (request.wristband_records or [])],
+        key=lambda x: x.data_time,
     )
-
-    # 解析手环数据（可能为空）
-    wristband_records = []
-    for item in (request.wristband_records or []):
-        wristband_records.append(WristbandRecord(
-            id=item.get("id", ""), history_type=item.get("history_type", ""),
-            seq=item.get("seq", 0), data_time=item.get("data_time", ""),
-            avg_hr=item.get("avg_hr"), max_hr=item.get("max_hr"), min_hr=item.get("min_hr"),
-            fatigue=item.get("fatigue"), rmssd=item.get("rmssd"),
-            bp_hr=item.get("bp_hr"), sbp=item.get("sbp"), dbp=item.get("dbp"),
-            avg_spo2=item.get("avg_spo2"), min_spo2=item.get("min_spo2"), max_spo2=item.get("max_spo2"),
-            calorie=item.get("calorie"), steps=item.get("steps"),
-            distance=float(item["distance"]) if item.get("distance") is not None else None,
-            estimate_temp=float(item["estimate_temp"]) if item.get("estimate_temp") is not None else None,
-            type=item.get("type", ""),
-            person_id=item.get("person_id", ""), device_id=item.get("device_id", ""),
-        ))
-    wristband_records.sort(key=lambda x: x.data_time)
-
-    sleep_records = []
-    for item in (request.sleep_records or []):
-        sleep_records.append(SleepCacheRecord(
-            id=item.get("id", ""), person_id=item.get("person_id", ""),
-            device_id=item.get("device_id", ""), collect_date=item.get("collect_date", 0),
-            rri_data_list=item.get("rri_data_list", ""),
-            sleep_segments=item.get("sleep_segments", ""),
-            create_time=item.get("create_time", ""),
-        ))
-    sleep_records.sort(key=lambda x: x.collect_date)
+    sleep_records = sorted(
+        [_parse_sleep(item) for item in (request.sleep_records or [])],
+        key=lambda x: x.collect_date,
+    )
 
     if wristband_records:
         start = wristband_records[0].data_time[:10]
