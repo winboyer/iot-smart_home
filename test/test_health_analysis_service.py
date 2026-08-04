@@ -9,7 +9,7 @@ import time
 import urllib.request
 import urllib.error
 
-BASE_URL = "http://127.0.0.1:26022"
+BASE_URL = "http://127.0.0.1:8006"
 # REMOTE_BASE_URL = "http://120.26.34.95:7116"
 PASSED = 0
 FAILED = 0

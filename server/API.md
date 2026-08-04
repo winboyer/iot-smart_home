@@ -5,7 +5,7 @@
 | 项目 | 说明 |
 |------|------|
 | 服务名称 | Health Analysis Service |
-| 端口 | `26022` |
+| 端口 | `8006` |
 | 默认 LLM | DeepSeek API (`deepseek-v4-flash`)，由启动配置决定 |
 | 备用 LLM | 本地 Baichuan-M2-32B，设置 `DEFAULT_PROVIDER=local` 切换 |
 | 数据来源 | 请求体中直接传入数据库表数据 |
@@ -183,12 +183,12 @@ Content-Type: application/json
 
 ```bash
 # 1. 阻塞式分析（传入数据库表数据）
-curl -s -X POST http://localhost:26022/v1/health/analyze \
+curl -s -X POST http://localhost:8006/v1/health/analyze \
   -H "Content-Type: application/json" \
   -d '{"person":{...}, "wristband_records":[...], "sleep_records":[...]}' | python3 -m json.tool
 
 # 2. 流式分析
-curl -s -X POST http://localhost:26022/v1/health/analyze/stream \
+curl -s -X POST http://localhost:8006/v1/health/analyze/stream \
   -H "Content-Type: application/json" \
   -d '{"person":{...}, "wristband_records":[...], "sleep_records":[...]}'
 ```
