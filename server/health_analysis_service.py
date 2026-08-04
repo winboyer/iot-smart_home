@@ -14,17 +14,30 @@
 
 import asyncio
 import json
+import logging
 import os
 import re
+import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Iterator, Optional
+
+import httpx
 from openai import OpenAI
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 import uvicorn
+
+
+logger = logging.getLogger("health_analysis_service")
+if not logger.handlers:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -42,7 +55,10 @@ DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
 DEEPSEEK_MODEL    = "deepseek-v4-flash"
 
 # LLM 调用超时（秒），超时后降级为规则引擎
-LLM_TIMEOUT_SECONDS = 15
+# 注意：15s 对 DeepSeek 的较大 prompt（如综合分析 600 tokens）明显偏短，
+# 实测会频繁触发 APITimeoutError 并静默降级为规则引擎，导致响应质量不稳定，
+# 也让调用方误以为接口"重试/失败"。这里放宽到 60s。
+LLM_TIMEOUT_SECONDS = 60
 
 # 本地大模型配置（备用）
 LOCAL_API_KEY     = "none"
@@ -495,42 +511,77 @@ class LLMProvider:
                  timeout: float = LLM_TIMEOUT_SECONDS):
         self.model = model
         self.timeout = timeout
-        self.client = OpenAI(base_url=base_url, api_key=api_key,
-                             max_retries=0, timeout=timeout)
+        # 双层禁用重试：OpenAI SDK + 底层 HTTPTransport
+        transport = httpx.HTTPTransport(retries=0)
+        http_client = httpx.Client(transport=transport, timeout=timeout)
+        self.client = OpenAI(
+            base_url=base_url, api_key=api_key,
+            max_retries=0, timeout=timeout, http_client=http_client,
+        )
+        self.no_retry_client = self.client.with_options(max_retries=0, timeout=timeout)
 
     def chat(self, messages: list[dict], system_prompt: Optional[str] = None,
-             temperature: float = 0.2, max_tokens: int = 900) -> str:
+             temperature: float = 0.2, max_tokens: int = 900,
+             trace_label: str = "unknown") -> str:
         full = []
         if system_prompt:
             full.append({"role": "system", "content": system_prompt})
         full.extend(messages)
+        trace_id = uuid.uuid4().hex[:8]
+        start = time.perf_counter()
+        logger.info("LLM_START trace=%s label=%s model=%s", trace_id, trace_label, self.model)
         try:
-            resp = self.client.chat.completions.create(
+            resp = self.no_retry_client.chat.completions.create(
                 model=self.model, messages=full, stream=False,
                 temperature=temperature, top_p=0.8, max_tokens=max_tokens,
                 timeout=self.timeout,
             )
+            elapsed_ms = int((time.perf_counter() - start) * 1000)
+            logger.info("LLM_DONE trace=%s label=%s elapsed_ms=%d", trace_id, trace_label, elapsed_ms)
             if resp.choices and resp.choices[0].message:
                 return resp.choices[0].message.content or ""
             return ""
         except Exception as e:
+            elapsed_ms = int((time.perf_counter() - start) * 1000)
+            logger.warning(
+                "LLM_FAIL trace=%s label=%s elapsed_ms=%d error=%s",
+                trace_id,
+                trace_label,
+                elapsed_ms,
+                repr(e),
+            )
             return f"\n LLM 错误: {e}\n"
 
     def chat_stream(self, messages: list[dict], system_prompt: Optional[str] = None,
-                    temperature: float = 0.2, max_tokens: int = 900) -> Iterator[str]:
+                    temperature: float = 0.2, max_tokens: int = 900,
+                    trace_label: str = "unknown") -> Iterator[str]:
         full = []
         if system_prompt:
             full.append({"role": "system", "content": system_prompt})
         full.extend(messages)
+        trace_id = uuid.uuid4().hex[:8]
+        start = time.perf_counter()
+        logger.info("LLM_STREAM_START trace=%s label=%s model=%s", trace_id, trace_label, self.model)
         try:
-            stream = self.client.chat.completions.create(
+            stream = self.no_retry_client.chat.completions.create(
                 model=self.model, messages=full, stream=True,
                 temperature=temperature, top_p=0.8, max_tokens=max_tokens,
+                timeout=self.timeout,
             )
             for chunk in stream:
                 if chunk.choices and chunk.choices[0].delta.content:
                     yield chunk.choices[0].delta.content
+            elapsed_ms = int((time.perf_counter() - start) * 1000)
+            logger.info("LLM_STREAM_DONE trace=%s label=%s elapsed_ms=%d", trace_id, trace_label, elapsed_ms)
         except Exception as e:
+            elapsed_ms = int((time.perf_counter() - start) * 1000)
+            logger.warning(
+                "LLM_STREAM_FAIL trace=%s label=%s elapsed_ms=%d error=%s",
+                trace_id,
+                trace_label,
+                elapsed_ms,
+                repr(e),
+            )
             yield f"\n LLM 错误: {e}\n"
 
 
@@ -1069,9 +1120,9 @@ class HealthAnalysisAssistant:
 
         # 3. 辅助函数
         def _is_llm_error(text: str) -> bool:
-            return not text or text.startswith("\n LLM 错误") or text.startswith("暂无")
+            return not text or "LLM 错误" in text or text.startswith("暂无")
 
-        def _call_llm(prompt: str, max_tokens: int = 500) -> str:
+        def _call_llm(label: str, prompt: str, max_tokens: int = 500) -> str:
             if prompt.startswith("暂无"):
                 return prompt
             try:
@@ -1079,6 +1130,7 @@ class HealthAnalysisAssistant:
                     [{"role": "user", "content": prompt}],
                     system_prompt=SYSTEM_PROMPT,
                     max_tokens=max_tokens,
+                    trace_label=label,
                 )
                 return resp.strip()
             except Exception:
@@ -1115,7 +1167,7 @@ class HealthAnalysisAssistant:
         results: dict[str, object] = {}
         with ThreadPoolExecutor(max_workers=8) as executor:
             future_map = {
-                executor.submit(_call_llm, prompt, max_tokens): (key, fallback)
+                executor.submit(_call_llm, key, prompt, max_tokens): (key, fallback)
                 for key, prompt, max_tokens, fallback in tasks
             }
             for future in as_completed(future_map):
@@ -1131,6 +1183,8 @@ class HealthAnalysisAssistant:
         if isinstance(comprehensive, str):
             eval_text, advice_text = self._parse_comprehensive(comprehensive)
             comprehensive = {"综合评价": eval_text, "体检建议": advice_text}
+
+        comprehensive["健康指数"] = self._compute_health_index(summaries)
 
         return {
             "综合分析": comprehensive,
@@ -1170,6 +1224,154 @@ class HealthAnalysisAssistant:
             advice = "建议定期体检，关注血压、血糖、血脂等基础指标。"
 
         return overall, advice
+
+    @staticmethod
+    def _compute_health_index(summaries: dict) -> dict:
+        """计算各维度 1-9 健康指数（上限 9 分表示始终有提升空间），无数据返回 '-'
+        评分仅基于指标健康度，不受数据量影响。"""
+
+        def _score(raw: int) -> int:
+            """原始 1-10 映射到 1-9，满分从 10→9"""
+            return min(raw, 9)
+
+        result = {}
+
+        # === 睡眠（基于夜间心率偏离正常范围的百分比） ===
+        sleep = summaries.get("sleep", {})
+        if sleep.get("has_data"):
+            hr_avg = sleep.get("sleep_hr_avg")
+            if hr_avg is None:
+                result["睡眠"] = "-"   # 有睡眠记录但无心率数据 → 无法计算
+            elif 55 <= hr_avg <= 80:
+                result["睡眠"] = 9   # 正常范围
+            else:
+                # 计算偏离正常范围的百分比
+                deviation = (hr_avg - 80) / 80 * 100 if hr_avg > 80 else (55 - hr_avg) / 55 * 100
+                if deviation <= 10:
+                    result["睡眠"] = 8
+                elif deviation <= 20:
+                    result["睡眠"] = 7
+                elif deviation <= 30:
+                    result["睡眠"] = 6
+                else:
+                    result["睡眠"] = 5
+        else:
+            result["睡眠"] = "-"
+
+        # === 心率（平均心率 + 异常占比） ===
+        hr = summaries.get("heart_rate", {})
+        if hr.get("has_data"):
+            avg_hr = hr.get("avg_hr", 0) or 0
+            total = max(hr.get("total_records", 0), 1)
+            above_100 = hr.get("above_100_count", 0)
+            ratio = above_100 / total
+            if 55 <= avg_hr <= 80 and ratio < 0.05:
+                raw = 10
+            elif 55 <= avg_hr <= 90 and ratio < 0.1:
+                raw = 8
+            elif ratio < 0.2:
+                raw = 6
+            else:
+                raw = 4
+            result["心率"] = _score(raw)
+        else:
+            result["心率"] = "-"
+
+        # === 血压（收缩压/舒张压 + 超标占比） ===
+        bp = summaries.get("blood_pressure", {})
+        if bp.get("has_data"):
+            avg_sbp = bp.get("avg_sbp", 0) or 0
+            avg_dbp = bp.get("avg_dbp", 0) or 0
+            above = bp.get("above_ideal_count", 0)
+            total = max(bp.get("total_records", 0), 1)
+            ratio = above / total
+            if avg_sbp < 120 and avg_dbp < 80 and ratio == 0:
+                raw = 10
+            elif avg_sbp < 130 and avg_dbp < 85 and ratio < 0.1:
+                raw = 8
+            elif ratio < 0.3:
+                raw = 6
+            else:
+                raw = 4
+            result["血压"] = _score(raw)
+        else:
+            result["血压"] = "-"
+
+        # === 运动（日均步数） ===
+        exercise = summaries.get("exercise", {})
+        if exercise.get("has_data"):
+            avg_steps = exercise.get("avg_daily_steps", 0) or 0
+            if avg_steps >= 10000:
+                raw = 10
+            elif avg_steps >= 5000:
+                raw = 9
+            elif avg_steps >= 3000:
+                raw = 8
+            elif avg_steps >= 2000:
+                raw = 7
+            elif avg_steps >= 1000:
+                raw = 6
+            elif avg_steps >= 500:
+                raw = 5
+            elif avg_steps >= 300:
+                raw = 3
+            else:
+                raw = 1
+            result["运动"] = _score(raw)
+        else:
+            result["运动"] = "-"
+
+        # === 血氧（平均血氧 + 偏低次数） ===
+        spo2 = summaries.get("spo2", {})
+        if spo2.get("has_data"):
+            avg_spo2 = spo2.get("avg_spo2", 0) or 0
+            below_95 = spo2.get("below_95_count", 0)
+            below_90 = spo2.get("below_90_count", 0)
+            if below_90 > 0:
+                raw = 3
+            elif avg_spo2 >= 98 and below_95 == 0:
+                raw = 10
+            elif avg_spo2 >= 96 and below_95 <= 1:
+                raw = 8
+            elif avg_spo2 >= 95:
+                raw = 6
+            else:
+                raw = 4
+            result["血氧"] = _score(raw)
+        else:
+            result["血氧"] = "-"
+
+        # === 体温（最高体温 + 超 37.3 次数） ===
+        temp = summaries.get("temperature", {})
+        if temp.get("has_data"):
+            max_temp = temp.get("max_temp", 0) or 0
+            above_373 = temp.get("above_373_count", 0)
+            if above_373 == 0 and max_temp <= 37.0:
+                raw = 10
+            elif above_373 == 0:
+                raw = 9
+            elif above_373 <= 2:
+                raw = 6
+            else:
+                raw = 4
+            result["体温"] = _score(raw)
+        else:
+            result["体温"] = "-"
+
+        # === 房颤（基于 RMSSD/HRV 值） ===
+        afib = summaries.get("afib_risk", {})
+        if afib.get("has_data"):
+            rmssd = afib.get("rmssd_avg")
+            if rmssd is None:
+                result["房颤"] = "-"   # 无 RMSSD/HRV 数据 → 无法计算
+            elif 20 <= rmssd <= 70:
+                result["房颤"] = 9
+            else:
+                result["房颤"] = 7
+        else:
+            result["房颤"] = "-"
+
+        return result
 
     def analyze_all_stream(self, wristband_records: list[WristbandRecord],
                            sleep_records: list[SleepCacheRecord],
@@ -1216,6 +1418,7 @@ class HealthAnalysisAssistant:
                 [{"role": "user", "content": prompt}],
                 system_prompt=SYSTEM_PROMPT,
                 max_tokens=max_tokens,
+                trace_label=label,
             ):
                 full += chunk
             yield json.dumps({"type": label, "content": full.strip()}, ensure_ascii=False) + "\n"
@@ -1360,12 +1563,7 @@ async def health_analyze(request: HealthAnalysisRequest):
         start = wristband_records[0].data_time[:10]
         end = wristband_records[-1].data_time[:10]
         days = (datetime.strptime(end, "%Y-%m-%d") - datetime.strptime(start, "%Y-%m-%d")).days + 1
-        if days <= 7:
-            report_period = "近一周"
-        elif days <= 31:
-            report_period = "近一个月"
-        else:
-            report_period = f"近{days}天"
+        report_period = f"近{days}天"
     elif sleep_records:
         report_period = f"{len(sleep_records)}晚睡眠数据"
     else:
@@ -1413,7 +1611,7 @@ async def health_analyze_stream(request: HealthAnalysisRequest):
         start = wristband_records[0].data_time[:10]
         end = wristband_records[-1].data_time[:10]
         days = (datetime.strptime(end, "%Y-%m-%d") - datetime.strptime(start, "%Y-%m-%d")).days + 1
-        report_period = "近一周" if days <= 7 else ("近一个月" if days <= 31 else f"近{days}天")
+        report_period = f"近{days}天"
     elif sleep_records:
         report_period = f"{len(sleep_records)}晚睡眠数据"
     else:
