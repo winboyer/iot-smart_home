@@ -14,4 +14,16 @@ if [ -z "$DEEPSEEK_API_KEY" ]; then
     exit 1
 fi
 
-conda run -n smart_home python server/health_analysis_service.py
+# 创建日志目录
+mkdir -p logs
+
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] 启动服务..." | tee -a logs/service.log
+
+PYTHON_BIN="$HOME/Setups/miniconda3/envs/smart_home/bin/python"
+nohup "$PYTHON_BIN" -u server/health_analysis_service.py \
+    >> logs/service.log 2>&1 &
+
+PID=$!
+echo "PID: $PID" | tee -a logs/service.log
+echo "日志文件: logs/service.log"
+echo "查看日志: tail -f logs/service.log"
