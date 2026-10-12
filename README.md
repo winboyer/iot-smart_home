@@ -1,5 +1,7 @@
 # iot-smart_home
 
+> 服务已配置为 **systemd 用户服务开机自启动**，详见文末「开机自启动」章节。
+
 ## `/v1/analyze/overview` 接口请求说明文档
 
 ### 1. 接口概述
@@ -292,3 +294,50 @@ curl -X POST "http://127.0.0.1:26021/v1/analyze/overview" \
 - `data` 字段现在为**必填项**，不能再直接将健康数据平铺在请求体顶层。
 - 推荐统一按 `analysis_type + data` 的格式调用接口。
 - 该接口依赖大模型生成分析内容，响应可能较慢，请耐心等待。
+
+---
+
+## 10. 开机自启动（systemd 用户服务）
+
+两个服务均已注册为 **systemd 用户服务** 并设置为开机自启动（`loginctl` 已开启 `Linger=yes`，无需登录桌面即可启动）。
+
+| 服务 | 单元文件 | 作用 |
+|---|---|---|
+| `iot-smart-home.service` | `~/.config/systemd/user/iot-smart-home.service` | 执行 `start_service.sh` 启动健康分析服务（监听 `0.0.0.0:8006`） |
+| `frp-proxy.service` | `~/.config/systemd/user/frp-proxy.service` | 上者启动成功后，在 `gnome-terminal` 窗口中运行 `frpc -c frpc.toml`，将 `8006` 映射到公网 `7116` |
+
+### 10.1 依赖关系与启动顺序
+
+1. `iot-smart-home.service` 执行 `start_service.sh`（`WorkingDirectory` 为项目根目录，因此能读到 `.env` 中的 `DEEPSEEK_API_KEY`）；
+2. 启动后用 `ExecStartPost` 探测 `127.0.0.1:8006`，60 秒内未监听则判定本次启动失败并自动重试；
+3. `frp-proxy.service` 通过 `After/Wants=iot-smart-home.service` 在其之后启动，并等待 `8006` 端口就绪后再拉起 `frpc`。
+
+### 10.2 常用运维命令
+
+```bash
+# 查看状态 / 日志
+systemctl --user status iot-smart-home.service frp-proxy.service
+journalctl --user -u iot-smart-home.service -f     # 服务启动日志
+journalctl --user -u frp-proxy.service -f          # frpc 启动日志
+tail -f logs/service.log                           # 业务运行日志
+tail -f logs/frpc.log                              # frpc 隧道日志（与终端窗口同步输出）
+
+# 启停 / 重启
+systemctl --user start   frp-proxy.service
+systemctl --user stop    frp-proxy.service
+systemctl --user restart iot-smart-home.service
+
+# 开启 / 关闭开机自启动
+systemctl --user enable  iot-smart-home.service frp-proxy.service
+systemctl --user disable iot-smart-home.service frp-proxy.service
+
+# 修改单元文件后重新加载
+systemctl --user daemon-reload
+```
+
+### 10.3 注意事项
+
+- `frpc` 由 `gnome-terminal` 拉起，其子进程归属 `gnome-terminal-server` 的 cgroup，不在本服务的 cgroup 内。因此 `frp-proxy.service` 的 `ExecStopPost` 会调用 `start_frpc_terminal.sh --cleanup` 清理残留进程；启动前也会先清理，避免 frp 服务端报 `proxy [web_8006] already exists`。
+- 关闭弹出的终端窗口即停止 `frpc`（服务不会自动重开），需要时用 `systemctl --user start frp-proxy` 重新启动。
+- 如果在无图形会话的环境开机（例如纯 SSH 启动），脚本会等待图形会话最多 180 秒，超时后自动退化为后台运行 `frpc`，功能不受影响。
+- `start_frpc_terminal.sh` 支持环境变量覆盖：`FRP_DIR`、`FRPC_CONF`、`SERVICE_PORT`、`LOG_FILE`。
