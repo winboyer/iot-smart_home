@@ -1,0 +1,18 @@
+{
+  "heartbeat": 1,
+  "someoneExists": 1,
+  "movementSigns": 31,
+  "breathValue": 22,
+  "heartRateValue": 55,
+  "sleepStatus": 2,
+  "getIntoBed": 1,
+  "awakeDuration": 45,
+  "lightSleepDuration": 132,
+  "deepSleepDuration": 48,
+  "sleepScore": 41,
+  "sleepComprehensiveStatus": [1, 2, 22, 55, 31, 25, 55, 6],
+  "sleepQualityAnalysis": [41, 0, 180, 15, 60, 25, 22, 3, 31, 22, 55, 6],
+  "abnormalSleep": 0,
+  "breathe_alarm": 1,
+  "bedoff_alarm": 1
+}

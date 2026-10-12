@@ -4,6 +4,7 @@
 """
 
 import json
+import os
 import sys
 import time
 import urllib.request
@@ -363,6 +364,191 @@ def test_camel_compat():
 
 
 # ---------------------------------------------------------------------------
+# 极地项目（睡眠传感器）测试数据
+# 请求体支持两种写法：
+#   1）聚合式（推荐）：projectId / personId / deviceId / collectTime + metrics 指标数组
+#   2）平铺式（兼容）：上报指标字段直接放在请求体顶层
+# ---------------------------------------------------------------------------
+
+POLAR_TEST_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _load_polar_sample(name: str) -> dict:
+    with open(os.path.join(POLAR_TEST_DIR, name), "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+POLAR_METRICS_NORMAL = _load_polar_sample("polar_metrics_normal_sample.json")
+POLAR_METRICS_ABNORMAL = _load_polar_sample("polar_metrics_abnormal_sample.json")
+POLAR_FLAT_NORMAL = _load_polar_sample("polar_sensor_normal_sample.json")
+POLAR_FLAT_ABNORMAL = _load_polar_sample("polar_sensor_abnormal_sample.json")
+
+POLAR_NORMAL_LEVELS = {"综合评价": "正常", "心率分析": "正常", "呼吸分析": "正常"}
+
+
+def _assert_polar_meta(data: dict, expect: dict) -> None:
+    """校验上报元数据（projectId / personId / deviceId / collectTime）原样回显"""
+    for key, value in expect.items():
+        assert data.get(key) == value, f"{key} 期望 {value}，实际 {data.get(key)}"
+
+
+def _assert_polar_shape(data: dict) -> dict:
+    """校验极地接口元数据、结论速览与三大分析项结构，返回 analysis"""
+    for key in ("projectId", "personId", "deviceId", "collectTime", "reportPeriod"):
+        assert key in data, f"响应缺少元数据字段: {key}"
+
+    conclusion = data.get("conclusion", {})
+    for key in ("综合评价", "睡眠分析", "心率分析", "呼吸分析"):
+        assert key in conclusion, f"conclusion 缺少: {key}"
+        assert conclusion[key] in ("正常", "需关注", "异常"), \
+            f"conclusion[{key}] 取值异常: {conclusion[key]}"
+
+    analysis = data.get("analysis", {})
+    for dim in ("综合分析", "睡眠分析", "心率呼吸分析"):
+        assert dim in analysis, f"缺少维度: {dim}"
+
+    overall = analysis["综合分析"]
+    assert set(overall) == {"综合评价", "体检建议"}, f"综合分析字段异常: {set(overall)}"
+    for key in ("综合评价", "体检建议"):
+        assert "标题" in overall[key] and "内容" in overall[key], f"{key} 缺少 标题/内容"
+
+    assert "内容" in analysis["睡眠分析"], "睡眠分析缺少 内容"
+
+    hr_br = analysis["心率呼吸分析"]
+    for key in ("心率分析", "呼吸分析"):
+        assert key in hr_br, f"心率呼吸分析缺少: {key}"
+        assert "标题" in hr_br[key] and "内容" in hr_br[key], f"{key} 缺少 标题/内容"
+
+    # 结论速览与三大分析项中的标签必须一致
+    assert conclusion["综合评价"] == overall["综合评价"]["标题"], "结论速览与综合分析不一致"
+    assert conclusion["心率分析"] == hr_br["心率分析"]["标题"], "结论速览与心率分析不一致"
+    assert conclusion["呼吸分析"] == hr_br["呼吸分析"]["标题"], "结论速览与呼吸分析不一致"
+    return analysis
+
+
+def _polar_levels(analysis: dict) -> dict:
+    return {
+        "综合评价": analysis["综合分析"]["综合评价"]["标题"],
+        "心率分析": analysis["心率呼吸分析"]["心率分析"]["标题"],
+        "呼吸分析": analysis["心率呼吸分析"]["呼吸分析"]["标题"],
+    }
+
+
+@test("9. 极地项目分析 - 聚合式指标数组（正常样本，元数据回显）")
+def test_polar_metrics_normal():
+    resp = post_json(f"{BASE_URL}/v1/health/polar/analyze", POLAR_METRICS_NORMAL)
+    assert_status(resp, 200)
+
+    data = assert_json(resp)
+    _assert_polar_meta(data, {
+        "projectId": "SIM_PROJECT_001",
+        "personId": "8800000000000001",
+        "deviceId": "8001",
+        "collectTime": "2026-10-12 06:30:00",
+    })
+    assert data.get("reportPeriod") == "2026-10-12 监测", \
+        f"reportPeriod 期望取自 collectTime，实际 {data.get('reportPeriod')}"
+
+    analysis = _assert_polar_shape(data)
+    levels = _polar_levels(analysis)
+    assert levels == POLAR_NORMAL_LEVELS, f"正常样本结论期望全部正常，实际 {levels}"
+    assert "7.3" in analysis["睡眠分析"]["内容"], "睡眠分析内容应体现 7.3 小时总时长"
+    print(f"  ✅ 聚合式指标正常样本: {levels}")
+
+
+@test("10. 极地项目分析 - 空数据")
+def test_polar_analyze_empty():
+    resp = post_json(f"{BASE_URL}/v1/health/polar/analyze", {})
+    assert_status(resp, 200)
+
+    data = assert_json(resp)
+    _assert_polar_meta(data, {"projectId": "", "personId": "", "deviceId": "", "collectTime": ""})
+    analysis = _assert_polar_shape(data)
+    assert analysis["综合分析"]["综合评价"]["标题"] == "需关注", \
+        "无睡眠数据时综合评价至少为 需关注"
+    print("  ✅ 空数据返回结构完整，结论降级为 需关注")
+
+
+@test("11. 极地项目分析 - metrics snake_case 与序号剥离")
+def test_polar_metrics_snake():
+    payload = {
+        "project_id": "SIM_PROJECT_002",
+        "person_id": "8800000000000003",
+        "device_id": "8003",
+        "collect_time": "2026-10-12 06:45:00",
+        "metrics": [
+            {"metric_name": "sleep_hours", "metric_value": "7.5"},
+            {"metric_name": "heart_rate_value_1", "metric_value": "60"},
+            {"metric_name": "heart_rate_value_2", "metric_value": "70"},
+            {"metric_name": "breath_value_1", "metric_value": "18"},
+            {"metric_name": "movement_signs_1", "metric_value": "10"},
+        ],
+    }
+    resp = post_json(f"{BASE_URL}/v1/health/polar/analyze", payload)
+    assert_status(resp, 200)
+
+    data = assert_json(resp)
+    _assert_polar_meta(data, {"projectId": "SIM_PROJECT_002", "deviceId": "8003"})
+    analysis = _assert_polar_shape(data)
+    levels = _polar_levels(analysis)
+    assert levels == POLAR_NORMAL_LEVELS, f"snake_case 等价输入应得到相同结论，实际 {levels}"
+    assert "65" in analysis["心率呼吸分析"]["心率分析"]["内容"], \
+        "同一指标多次上报应取平均（60 与 70 -> 65）"
+    print("  ✅ metrics snake_case 解析正常，序号后缀剥离，多次上报取平均")
+
+
+@test("12. 极地项目分析 - 平铺式字段（兼容旧调用方）")
+def test_polar_flat_compat():
+    resp = post_json(f"{BASE_URL}/v1/health/polar/analyze", POLAR_FLAT_NORMAL)
+    assert_status(resp, 200)
+
+    analysis = _assert_polar_shape(assert_json(resp))
+    levels = _polar_levels(analysis)
+    assert levels == POLAR_NORMAL_LEVELS, f"平铺式等价输入应得到相同结论，实际 {levels}"
+    print("  ✅ 平铺式写法仍可用")
+
+
+@test("13. 极地项目分析 - 聚合式异常样本（睡眠不足4小时 + 呼吸报警）")
+def test_polar_metrics_abnormal():
+    resp = post_json(f"{BASE_URL}/v1/health/polar/analyze", POLAR_METRICS_ABNORMAL)
+    assert_status(resp, 200)
+
+    analysis = _assert_polar_shape(assert_json(resp))
+    levels = _polar_levels(analysis)
+    assert levels["综合评价"] == "异常", f"异常样本综合评价期望 异常，实际 {levels}"
+    assert levels["呼吸分析"] != "正常", f"呼吸报警样本不应判定为正常，实际 {levels}"
+    assert "3.2" in analysis["睡眠分析"]["内容"], "睡眠分析内容应体现约 3.2 小时的总时长"
+    print(f"  ✅ 聚合式异常样本判定正确: {levels}")
+
+
+@test("14. 极地项目分析 - 十六进制字节数组兼容（平铺）")
+def test_polar_analyze_hex_bytes():
+    payload = dict(POLAR_FLAT_NORMAL)
+    payload["sleepComprehensiveStatus"] = "01010F3D17122A02"
+    payload["sleepQualityAnalysis"] = "5201A4064A1A0C01170F3D02"
+    resp = post_json(f"{BASE_URL}/v1/health/polar/analyze", payload)
+    assert_status(resp, 200)
+
+    analysis = _assert_polar_shape(assert_json(resp))
+    levels = _polar_levels(analysis)
+    assert levels == POLAR_NORMAL_LEVELS, f"十六进制数组应等价于整型数组，实际 {levels}"
+    print("  ✅ 十六进制字节数组解析正常")
+
+
+@test("15. 极地项目分析 - 缺质量分析时按分项时长兜底")
+def test_polar_analyze_fallback_total():
+    payload = dict(POLAR_FLAT_NORMAL)
+    payload.pop("sleepQualityAnalysis", None)
+    resp = post_json(f"{BASE_URL}/v1/health/polar/analyze", payload)
+    assert_status(resp, 200)
+
+    analysis = _assert_polar_shape(assert_json(resp))
+    levels = _polar_levels(analysis)
+    assert levels == POLAR_NORMAL_LEVELS, f"兜底总时长应为 7 小时（正常），实际 {levels}"
+    print("  ✅ 无质量分析字段时按 深睡+浅睡 兜底计算总时长")
+
+
+# ---------------------------------------------------------------------------
 # 主流程
 # ---------------------------------------------------------------------------
 
@@ -380,6 +566,13 @@ if __name__ == "__main__":
     test_missing_person()
     test_empty_body()
     test_camel_compat()
+    test_polar_metrics_normal()
+    test_polar_analyze_empty()
+    test_polar_metrics_snake()
+    test_polar_flat_compat()
+    test_polar_metrics_abnormal()
+    test_polar_analyze_hex_bytes()
+    test_polar_analyze_fallback_total()
 
     print(f"\n{'='*60}")
     print(f"  测试结果: {PASSED + FAILED} 个用例, {PASSED} 通过, {FAILED} 失败")

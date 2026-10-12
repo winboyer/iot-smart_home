@@ -1,0 +1,32 @@
+{
+  "projectId": "SIM_PROJECT_001",
+  "personId": "8800000000000002",
+  "deviceId": "8002",
+  "collectTime": "2026-10-12 07:10:00",
+  "metrics": [
+    {
+      "metricName": "sleepHours",
+      "metricValue": "3.20"
+    },
+    {
+      "metricName": "heartRateValue1",
+      "metricValue": "58"
+    },
+    {
+      "metricName": "heartRateValue2",
+      "metricValue": "62"
+    },
+    {
+      "metricName": "breathValue1",
+      "metricValue": "23"
+    },
+    {
+      "metricName": "movementSigns1",
+      "metricValue": "26"
+    },
+    {
+      "metricName": "breathe_alarm",
+      "metricValue": 1
+    }
+  ]
+}

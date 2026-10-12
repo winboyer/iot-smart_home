@@ -1,4 +1,6 @@
-# 手环健康综合管理分析服务 API 文档
+# 健康综合管理分析服务 API 文档
+
+> 服务包含两条相互独立的数据链路：**手环健康分析**（1、2 节）与**极地项目睡眠传感器分析**（3 节）。
 
 ## 服务信息
 
@@ -19,6 +21,10 @@
 | `person` | `biz_person` | object | 人员基础信息，单条记录 |
 | `wristband_records` | `biz_wristband_cache` | array | 手环实时缓存数据 |
 | `sleep_records` | `biz_person_sleep_result` | array | 睡眠分析结果数据 |
+
+> 极地项目接口（第 3 节）使用另一套请求体：上报元数据（`projectId` / `personId` /
+> `deviceId` / `collectTime`）+ `metrics` 指标数组（一个请求 = 一条监测数据，
+> 指标字段也可平铺，详见该节）。
 
 ---
 
@@ -170,6 +176,200 @@ Content-Type: application/json
 第一条为 `"meta"` 类型，包含人员信息和报告周期。
 
 ---
+
+### 3. 极地项目健康体检数据分析（阻塞式）
+
+**`POST /v1/health/polar/analyze`**
+
+> 本节为接口契约说明。**面向调用方的调用方式文档（含 cURL / Python / Java / JavaScript 示例、
+> 错误码、自测清单）见 [`POLAR_API_GUIDE.md`](./POLAR_API_GUIDE.md)。**
+
+面向极地项目的睡眠传感器上报数据。**一个请求 = 一条监测数据**。请求体支持两种写法：
+
+- **聚合式（推荐）**：上报元数据（`projectId` / `personId` / `deviceId` / `collectTime`）+
+  `metrics` 指标数组；
+- **平铺式（兼容）**：指标字段直接平铺在请求体顶层（见本节末尾附录）。
+
+聚焦 **睡眠时长、夜间心率、呼吸** 三项核心指标。响应在**原样回显上报元数据**的同时，
+给出 **结论速览（`conclusion`）** 与 **完整分析（`analysis`）**。
+与手环接口（1、2）相互独立，互不影响。
+
+#### 请求
+
+```http
+POST /v1/health/polar/analyze
+Content-Type: application/json
+```
+
+```json
+{
+  "projectId": "SIM_PROJECT_001",
+  "personId": "8800000000000001",
+  "deviceId": "8001",
+  "collectTime": "2026-10-12 06:30:00",
+  "metrics": [
+    { "metricName": "sleepHours", "metricValue": "7.30" },
+    { "metricName": "heartRateValue1", "metricValue": "64" },
+    { "metricName": "breathValue1", "metricValue": "16" },
+    { "metricName": "movementSigns1", "metricValue": "8" }
+  ]
+}
+```
+
+#### 上报元数据字段
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|:----:|------|
+| `projectId` | string | 否 | 项目编码，原样回显 |
+| `personId` | string | 否 | 人员编码，原样回显 |
+| `deviceId` | string | 否 | 设备编码，原样回显 |
+| `collectTime` | string | 否 | 采集时间，`YYYY-MM-DD HH:mm:ss`；用于生成报告周期文案 |
+| `metrics` | array | 否 | 指标数组，元素为 `{metricName, metricValue}` |
+| `person` | object | 否 | 人员基础信息（`id`/`name`/`gender`/`age`），仅用于个性化文案 |
+
+#### `metrics` 指标名对照表
+
+`metricName` 忽略大小写与分隔符差异，并自动剥离**尾部采集序号**
+（`heartRateValue1`、`heart_rate_value_2` 均等价于 `heartRateValue`）。
+同一指标多次上报时：**数值型取平均**，**状态 / 事件型取最后一次**。
+
+| `metricName`（归一化后） | 含义 | 单位 | 参与分析 |
+|------|------|------|------|
+| `sleepHours` | 睡眠总时长 | 小时 | 睡眠分析（**优先级最高**） |
+| `heartRateValue` | 夜间心率 | bpm | 心率分析 |
+| `breathValue` | 夜间呼吸 | 次/分 | 呼吸分析 |
+| `movementSigns` | 运动体征（体动幅度） | — | 辅助指标 |
+| `deepSleepDuration` / `deepSleepHours` | 深睡时长 | 分钟 / 小时 | 睡眠结构 |
+| `lightSleepDuration` / `lightSleepHours` | 浅睡时长 | 分钟 / 小时 | 睡眠结构 |
+| `awakeDuration` / `awakeHours` | 清醒时长 | 分钟 / 小时 | 睡眠结构 |
+| `sleepScore` | 睡眠评分 | 0-100 | 辅助指标 |
+| `sleepStatus` | 睡眠状态 | `0`深睡 / `1`浅睡 / `2`清醒 / `3`无 | 辅助指标 |
+| `heartbeat` | 设备心跳 | `0`异常 / `1`正常 | 辅助指标 |
+| `someoneExists` | 人体存在 | `0`无人 / `1`有人 | 辅助指标 |
+| `getIntoBed` | 入床离床 | `0`离床 / `1`入床 | 辅助指标 |
+| `abnormalSleep` | 设备睡眠异常判定 | `0`不足4h / `1`大于12h / `2`长时间无人 / `3`无 | 睡眠分析（直接判异常） |
+| `breathe_alarm` | 呼吸报警 | `0`正常 / `1`异常 | 呼吸分析（至少需关注） |
+| `bedoff_alarm` | 离床报警 | `0`正常 / `1`异常 | 睡眠分析（至少需关注） |
+| `sleepComprehensiveStatus` | 睡眠综合状态 | 8 字节数组 | 见下方位序 |
+| `sleepQualityAnalysis` | 睡眠质量分析 | 12 字节数组 | 见下方位序 |
+
+**兼容性**
+
+- `metricValue` 兼容字符串数字（`"7.30"` 与 `7.30` 等价）；布尔类支持 `0/1`、`true/false`。
+- 未识别的 `metricName` 会被忽略，不返回 422。
+
+**字节数组位序**
+
+- `sleepComprehensiveStatus`（8 字节）：`[存在、睡眠状态、平均呼吸、平均心跳、翻身次数、大幅度体动占比、小幅度体动占比、呼吸暂停次数]`
+- `sleepQualityAnalysis`（12 字节）：`[睡眠质量评分、睡眠总时长(2B)、清醒时长占比、浅睡时长占比、深睡时长占比、离床时长、离床次数、翻身次数、平均呼吸、平均心跳、呼吸暂停次数]`
+- 支持三种写法：整型数组 `[1,1,15,...]`、十六进制串 `"01010F3D17122A02"`、逗号或空格分隔串 `"1,1,15,..."`
+
+#### 字段换算与取值规则（服务端自动完成）
+
+| 分析指标 | 取值来源（按优先级） | 换算 |
+|------|------|------|
+| 睡眠总时长 | `sleepHours` → `sleepQualityAnalysis` 第 2、3 字节（大端）→ `deepSleepDuration` + `lightSleepDuration` | 统一换算为小时 |
+| 深睡 / 浅睡时长 | `deepSleepDuration` / `lightSleepDuration` | 分钟 ÷ 60 |
+| 卧床时长 | 睡眠总时长 + `awakeDuration` | 分钟 ÷ 60 |
+| 夜间平均心率 | `sleepComprehensiveStatus[3]` → `sleepQualityAnalysis[10]` → `heartRateValue` | 直接取值（bpm） |
+| 夜间平均呼吸 | `sleepComprehensiveStatus[2]` → `sleepQualityAnalysis[9]` → `breathValue` | 直接取值（次/分） |
+| 呼吸暂停次数 | `sleepComprehensiveStatus[7]` → `sleepQualityAnalysis[11]` | 直接取值 |
+| 离床次数 / 时长 | `sleepQualityAnalysis[7]` / `sleepQualityAnalysis[6]` | 直接取值 |
+| 翻身次数 | `sleepComprehensiveStatus[4]` → `sleepQualityAnalysis[8]` | 直接取值 |
+
+> 「睡眠综合状态」与「睡眠质量分析」按规格给出的位序依次解析；睡眠总时长占 2 字节，按**大端序**还原。
+
+#### 正常 / 异常参考区间（规则结论判定依据）
+
+| 指标 | 正常 | 异常 |
+|------|------|------|
+| 睡眠时长 | 7-9 小时 | < 4 小时 或 > 12 小时（与 `abnormalSleep` 定义一致） |
+| 夜间心率 | 60-100 bpm | < 50 bpm 或 > 110 bpm |
+| 呼吸率 | 12-20 次/分 | < 9 次/分 或 > 24 次/分 |
+
+介于正常与异常之间判定为「需关注」。此外：
+
+- `abnormalSleep` 为 `0`（不足 4 小时）或 `1`（大于 12 小时）时，睡眠分析直接判为「异常」；
+  为 `2`（长时间异常无人）时至少「需关注」。
+- `breathe_alarm = 1` 时呼吸分析至少「需关注」；`bedoff_alarm = 1` 时睡眠分析至少「需关注」。
+- 缺少睡眠数据时，「综合评价」为「需关注」。
+
+#### 响应
+
+```json
+{
+  "projectId": "SIM_PROJECT_001",
+  "personId": "8800000000000001",
+  "deviceId": "8001",
+  "collectTime": "2026-10-12 06:30:00",
+  "reportPeriod": "2026-10-12 监测",
+  "conclusion": {
+    "综合评价": "正常",
+    "睡眠分析": "正常",
+    "心率分析": "正常",
+    "呼吸分析": "正常"
+  },
+  "analysis": {
+    "综合分析": {
+      "综合评价": { "标题": "正常", "内容": "结合2026-10-12 监测数据，您的整体健康状况正常……" },
+      "体检建议": { "标题": "无", "内容": "建议定期体检，重点关注睡眠质量、心血管及呼吸系统等基础指标。" }
+    },
+    "睡眠分析": { "内容": "正常，2026-10-12 监测睡眠总时长约7.3小时，处于成人推荐的7-9小时范围内……" },
+    "心率呼吸分析": {
+      "心率分析": { "标题": "正常", "内容": "正常，2026-10-12 监测夜间平均心率约64.0bpm，处于正常参考范围（60-100bpm）……" },
+      "呼吸分析": { "标题": "正常", "内容": "正常，2026-10-12 监测夜间平均呼吸约16.0次/分，处于正常参考范围（12-20次/分）……" }
+    }
+  }
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `projectId` / `personId` / `deviceId` / `collectTime` | string | 上报元数据原样回显；请求未提供时为空串（`personId` / `deviceId` 可回退取 `person` 中的值） |
+| `reportPeriod` | string | 有 `collectTime` 时为 `{日期} 监测`，否则为 `本次监测` |
+| `conclusion` | object | **结论速览**：四项标签取值为 `正常` / `需关注` / `异常`，与 `analysis` 中对应项一致 |
+| `analysis` | object | **完整分析**：综合分析（综合评价 + 体检建议）、睡眠分析、心率呼吸分析（心率分析 + 呼吸分析） |
+| `分析项.标题` | string | `正常` / `需关注` / `异常`（体检建议固定为 `无`），由规则引擎基于数据判定 |
+| `分析项.内容` | string | 由 LLM 生成，LLM 不可用时降级为规则引擎文本 |
+| `睡眠分析` | object | 仅含 `内容` 字段（其结论标签见 `conclusion.睡眠分析`） |
+
+LLM 调用失败或超时时自动降级为规则引擎，接口始终返回 200。
+
+#### 附录：平铺式请求体（兼容旧调用方）
+
+指标字段也可直接平铺在请求体顶层，与聚合式等价、可混用（两者同时存在时**平铺字段优先**）：
+
+```json
+{
+  "heartbeat": 1,
+  "someoneExists": 1,
+  "movementSigns": 12,
+  "breathValue": 15,
+  "heartRateValue": 62,
+  "sleepStatus": 1,
+  "getIntoBed": 1,
+  "awakeDuration": 26,
+  "lightSleepDuration": 312,
+  "deepSleepDuration": 108,
+  "sleepScore": 82,
+  "sleepComprehensiveStatus": [1, 1, 15, 61, 23, 18, 42, 2],
+  "sleepQualityAnalysis": [82, 1, 164, 6, 74, 26, 12, 1, 23, 15, 61, 2],
+  "abnormalSleep": 3,
+  "breathe_alarm": 0,
+  "bedoff_alarm": 0
+}
+```
+
+#### 已知数据来源缺口（需极地项目方确认）
+
+以下内容在《睡眠传感器数据》规格中**没有对应字段**，服务端不输出或只能给出替代值：
+
+| 缺失项 | 影响 |
+|------|------|
+| REM / 快速眼动时长 | 传感器仅区分深睡、浅睡、清醒三态，睡眠结构分析不含 REM |
+| 心率报警次数 | 规格仅有 `breathe_alarm`、`bedoff_alarm` 两种报警，无心率报警字段 |
+| 入睡潜伏期 | 单条监测数据无法推算，已从输出中移除 |
+| 心率最低 / 最高值 | 规格未上报心率极值，仅输出夜间平均值 |
 
 ## 环境变量
 
