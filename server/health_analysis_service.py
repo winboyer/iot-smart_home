@@ -1450,6 +1450,21 @@ POLAR_QUALITY_TOTAL_MINUTES_SLICE = (1, 3)
 # 报告周期文案：上报数据为单条汇总，不含统计起止日期
 POLAR_PERIOD_TEXT = "本次监测"
 
+# 统计周期类型（periodType）-> 中文文案；键名统一按「小写、去分隔符」匹配
+POLAR_PERIOD_TYPE_LABELS = {
+    "day": "今日",
+    "daily": "今日",
+    "week": "近一周",
+    "weekly": "近一周",
+    "month": "近一个月",
+    "monthly": "近一个月",
+    "quarter": "近三个月",
+    "threemonth": "近三个月",
+    "threemonths": "近三个月",
+    "year": "近一年",
+    "yearly": "近一年",
+}
+
 # 规格 abnormalSleep 定义：0=睡眠时长不足 4 小时，1=睡眠时长大于 12 小时
 POLAR_SLEEP_ABNORMAL_HOURS = (4.0, 12.0)
 POLAR_ABNORMAL_SLEEP_LABELS = {
@@ -1953,6 +1968,285 @@ class PolarDataSummarizer:
         }
 
 
+class PolarMultiDaySummarizer:
+    """多日（周期）睡眠数据汇总
+
+    把 records（多天上报）汇总成与 PolarDataSummarizer.summarize 同形的摘要结构，
+    因此规则引擎与各分析 Prompt 可直接复用。区别在于数值含义为「多日统计」：
+    均值、极值、达标天数占比、逐日明细。仅一天输入时与单条汇总等价。
+    """
+
+    @staticmethod
+    def _stats(values):
+        vals = [v for v in values if v is not None]
+        if not vals:
+            return {"has_data": False, "avg": None, "min": None, "max": None,
+                    "days": 0, "daily": []}
+        return {
+            "has_data": True,
+            "avg": round(sum(vals) / len(vals), 2),
+            "min": round(min(vals), 2),
+            "max": round(max(vals), 2),
+            "days": len(vals),
+            "daily": [round(v, 2) for v in vals],
+        }
+
+    @staticmethod
+    def _compliance(values, lo, hi) -> float:
+        """达标率：落在正常参考区间内的天数占比（0~1）"""
+        vals = [v for v in values if v is not None]
+        if not vals:
+            return 0.0
+        return round(sum(1 for v in vals if lo <= v <= hi) / len(vals), 4)
+
+    @classmethod
+    def sleep_duration_summary(cls, records) -> dict:
+        lo, hi = PolarDataSummarizer.SLEEP_DURATION_NORMAL
+        totals = [r.sleep_total_hours for r in records]
+        st = cls._stats(totals)
+
+        # 设备主动上报的睡眠异常：按严重程度取最严重的一天（0/1 > 2 > 3）
+        abnormal = None
+        for cand in (0, 1, 2, 3):
+            if any(getattr(r, "abnormal_sleep", None) == cand for r in records):
+                abnormal = cand
+                break
+        abnormal_text = ""
+        for r in records:
+            if getattr(r, "abnormal_sleep", None) == abnormal:
+                abnormal_text = getattr(r, "abnormal_sleep_text", "") or ""
+                break
+
+        summary = {
+            "has_data": st["has_data"],
+            "days": st["days"],
+            "total_sleep_hours": st["avg"],
+            "min_sleep_hours": st["min"],
+            "max_sleep_hours": st["max"],
+            "daily_sleep_hours": st["daily"],
+            "compliance_rate": cls._compliance(totals, lo, hi),
+            "short_sleep_days": sum(1 for v in totals if v is not None and v < lo),
+            "normal_range": "%.0f~%.0f" % (lo, hi),
+            "abnormal_sleep": abnormal,
+            "abnormal_sleep_text": abnormal_text,
+            "bedoff_alarm": any(getattr(r, "bedoff_alarm", None) for r in records),
+        }
+        if not st["has_data"]:
+            return summary
+
+        deep = cls._stats([r.deep_sleep_hours for r in records])
+        light = cls._stats([r.light_sleep_hours for r in records])
+        awake = cls._stats([r.awake_hours for r in records])
+        score = cls._stats([r.sleep_score for r in records])
+        total = st["avg"]
+        return {
+            **summary,
+            "deep_sleep_hours": deep["avg"],
+            "light_sleep_hours": light["avg"],
+            "awake_hours": awake["avg"],
+            # 占比统一用「百分数」（24.9 表示 24.9%），与单日字节数组口径一致
+            "deep_sleep_ratio": round(deep["avg"] / total * 100, 2) if deep["avg"] and total else None,
+            "light_sleep_ratio": round(light["avg"] / total * 100, 2) if light["avg"] and total else None,
+            "awake_ratio": round(awake["avg"] / total * 100, 2) if awake["avg"] and total else None,
+            "sleep_score": score["avg"],
+            "turn_over_count": cls._stats([r.turn_over_count for r in records])["avg"],
+            "out_bed_count": cls._stats([r.out_bed_count for r in records])["avg"],
+            "out_bed_minutes": cls._stats([r.out_bed_minutes for r in records])["avg"],
+            "below_normal": total < lo,
+            "above_normal": total > hi,
+        }
+
+    @classmethod
+    def heart_rate_summary(cls, records) -> dict:
+        lo, hi = PolarDataSummarizer.HEART_RATE_NORMAL
+        vals = [r.avg_heart_rate for r in records]
+        st = cls._stats(vals)
+        summary = {
+            "has_data": st["has_data"],
+            "days": st["days"],
+            "avg_heart_rate": st["avg"],
+            "min_heart_rate": st["min"],
+            "max_heart_rate": st["max"],
+            "daily_heart_rate": st["daily"],
+            "compliance_rate": cls._compliance(vals, lo, hi),
+            "normal_range": "%.0f~%.0f" % (lo, hi),
+            "alarm": None,
+        }
+        if not st["has_data"]:
+            return summary
+        return {**summary,
+                "below_normal": st["avg"] < lo,
+                "above_normal": st["avg"] > hi}
+
+    @classmethod
+    def breathing_summary(cls, records) -> dict:
+        lo, hi = PolarDataSummarizer.BREATHING_NORMAL
+        vals = [r.avg_breathing_rate for r in records]
+        st = cls._stats(vals)
+        apnoea = [r.apnoea_count for r in records if r.apnoea_count is not None]
+        summary = {
+            "has_data": st["has_data"],
+            "days": st["days"],
+            "avg_breathing_rate": st["avg"],
+            "min_breathing_rate": st["min"],
+            "max_breathing_rate": st["max"],
+            "daily_breathing_rate": st["daily"],
+            "compliance_rate": cls._compliance(vals, lo, hi),
+            "normal_range": "%.0f~%.0f" % (lo, hi),
+            "apnoea_count": round(sum(apnoea) / len(apnoea), 1) if apnoea else None,
+            "apnoea_total": round(sum(apnoea), 1) if apnoea else None,
+            "alarm": any(getattr(r, "breathe_alarm", None) for r in records),
+        }
+        if not st["has_data"]:
+            return summary
+        return {**summary,
+                "below_normal": st["avg"] < lo,
+                "above_normal": st["avg"] > hi}
+
+    @classmethod
+    def summarize(cls, records) -> dict:
+        records = list(records or [])
+        return {
+            "sleep_duration": cls.sleep_duration_summary(records),
+            "heart_rate": cls.heart_rate_summary(records),
+            "breathing": cls.breathing_summary(records),
+        }
+
+
+class PolarScoreCalculator:
+    """综合评分计算器（确定性）
+
+      单项得分 = 均值得分 × 70% + 达标天数占比 × 100 × 30%
+      综合评分 = Σ(单项得分 × 权重) ÷ Σ(有效项权重)
+
+    缺数据的项不计入，剩余项权重归一化。同一份数据永远得到同一个分数，
+    不随大模型输出波动；评分与结论标签一并注入 Prompt，保证文案与分数一致。
+    """
+
+    SLEEP = "睡眠"
+    HEART_RATE = "心率"
+    BREATHING = "呼吸"
+
+    WEIGHTS = {SLEEP: 0.4, HEART_RATE: 0.3, BREATHING: 0.3}
+    MEAN_WEIGHT = 0.7
+    COMPLIANCE_WEIGHT = 0.3
+
+    # 某项无数据时的计分：按「中等」计入并保留权重，避免数据不足时评分虚高
+    MISSING_SCORE = 60.0
+
+    # (分数下界, 等级名)，自上而下首个命中
+    LEVELS = ((90, "优秀"), (80, "良好"), (70, "一般"), (60, "较差"), (0, "差"))
+
+    # 均值得分分段：(下界, 上界, 分数)，按顺序取首个命中；均不命中取 FLOOR
+    # 区间越靠近理想值分数越高，避免「只要落在正常区间就给满分」导致区分度不足
+    SLEEP_BANDS = (
+        (7.5, 8.5, 100.0),
+        (7.0, 7.5, 92.0), (8.5, 9.0, 92.0),
+        (6.5, 7.0, 84.0), (9.0, 9.5, 84.0),
+        (6.0, 6.5, 74.0), (9.5, 10.0, 74.0),
+        (5.0, 6.0, 62.0), (10.0, 11.0, 62.0),
+        (4.0, 5.0, 48.0), (11.0, 12.0, 48.0),
+    )
+    SLEEP_FLOOR = 35.0
+    HEART_RATE_BANDS = (
+        (60.0, 80.0, 100.0),
+        (80.0, 90.0, 92.0),
+        (90.0, 100.0, 84.0),
+        (55.0, 60.0, 85.0), (100.0, 105.0, 85.0),
+        (50.0, 55.0, 70.0), (105.0, 110.0, 70.0),
+    )
+    HEART_RATE_FLOOR = 40.0
+    BREATHING_BANDS = (
+        (12.0, 18.0, 100.0),
+        (18.0, 20.0, 92.0),
+        (10.0, 12.0, 85.0), (20.0, 22.0, 85.0),
+        (9.0, 10.0, 70.0), (22.0, 24.0, 70.0),
+    )
+    BREATHING_FLOOR = 40.0
+
+    @classmethod
+    def _band_score(cls, value, bands, floor):
+        if value is None:
+            return None
+        for lo, hi, score in bands:
+            if lo <= value <= hi:
+                return score
+        return floor
+
+    @classmethod
+    def _level(cls, total: int) -> str:
+        for floor, name in cls.LEVELS:
+            if total >= floor:
+                return name
+        return cls.LEVELS[-1][1]
+
+    @classmethod
+    def _note(cls) -> str:
+        return ("综合评分 = 睡眠 %.0f%% + 心率 %.0f%% + 呼吸 %.0f%%；"
+                "单项得分 = 均值得分 %.0f%% + 达标天数占比 %.0f%%；"
+                "某项无数据时按 %.0f 分计入并标记 missing"
+                % (cls.WEIGHTS[cls.SLEEP] * 100,
+                   cls.WEIGHTS[cls.HEART_RATE] * 100,
+                   cls.WEIGHTS[cls.BREATHING] * 100,
+                   cls.MEAN_WEIGHT * 100,
+                   cls.COMPLIANCE_WEIGHT * 100,
+                   cls.MISSING_SCORE))
+
+    @classmethod
+    def compute(cls, summaries: dict, statuses: dict) -> dict:
+        specs = (
+            (cls.SLEEP, "sleep_duration", "睡眠分析", "total_sleep_hours",
+             cls.SLEEP_BANDS, cls.SLEEP_FLOOR),
+            (cls.HEART_RATE, "heart_rate", "心率分析", "avg_heart_rate",
+             cls.HEART_RATE_BANDS, cls.HEART_RATE_FLOOR),
+            (cls.BREATHING, "breathing", "呼吸分析", "avg_breathing_rate",
+             cls.BREATHING_BANDS, cls.BREATHING_FLOOR),
+        )
+
+        items, weighted, weight_sum = {}, 0.0, 0.0
+        for label, key, status_key, value_key, bands, floor in specs:
+            data = summaries.get(key) or {}
+            mean = data.get(value_key)
+            weight = cls.WEIGHTS[label]
+            mean_score = cls._band_score(mean, bands, floor)
+
+            if mean_score is None:
+                # 该项无数据：按 MISSING_SCORE 计入权重，标注 missing 供调用方识别
+                items[label] = {
+                    "score": cls.MISSING_SCORE,
+                    "weight": weight,
+                    "mean": None,
+                    "compliance_rate": None,
+                    "status": statuses.get(status_key, ""),
+                    "missing": True,
+                }
+                weighted += cls.MISSING_SCORE * weight
+                weight_sum += weight
+                continue
+
+            rate = data.get("compliance_rate") or 0.0
+            score = mean_score * cls.MEAN_WEIGHT + rate * 100.0 * cls.COMPLIANCE_WEIGHT
+            items[label] = {
+                "score": round(score, 1),
+                "weight": weight,
+                "mean": mean,
+                "compliance_rate": rate,
+                "status": statuses.get(status_key, ""),
+                "missing": False,
+            }
+            weighted += score * weight
+            weight_sum += weight
+
+        result = {"items": items, "weights": dict(cls.WEIGHTS), "note": cls._note()}
+        # 三项全部无数据：不给分数（避免"没有数据"被误读成"健康状况较差"）
+        if weight_sum <= 0 or all(v.get("missing") for v in items.values()):
+            result.update({"total": None, "level": "暂无评分"})
+            return result
+        total = int(round(weighted / weight_sum))
+        result.update({"total": total, "level": cls._level(total)})
+        return result
+
+
 class PolarRuleBasedAnalyzer:
     """极地项目规则引擎：生成结论标签（正常/需关注/异常）与 LLM 不可用时的降级文本"""
 
@@ -2178,11 +2472,27 @@ class PolarAnalysisAssistant:
         parts = [p for p in (self.person.name, f"{self.person.age}岁" if self.person.age else "", gender) if p]
         return "，".join(parts) or "未知"
 
+    @staticmethod
+    def _score_text(score: dict, label: Optional[str] = None) -> str:
+        """把评分结果转成 Prompt 可用的一句话（评分由规则引擎算出，模型照述即可）"""
+        total = score.get("total")
+        if total is None:
+            return "综合评分：暂无评分（数据不足，不计入评分）"
+        items = score.get("items") or {}
+        if label and label in items:
+            it = items[label]
+            weight = it.get("weight") or 0.0
+            return (f"本项评分 {it.get('score')} 分（在综合评分中占 {weight * 100:.0f}%）；"
+                    f"综合评分 {total} 分（{score.get('level')}）")
+        detail = "，".join(f"{k} {v.get('score')} 分" for k, v in items.items())
+        return f"综合评分 {total} 分（{score.get('level')}），分项：{detail}"
+
     # ------------------------------------------------------------------
     # Prompt 构建
     # ------------------------------------------------------------------
 
-    def _comprehensive_prompt(self, summaries: dict, report_period: str, status: str) -> str:
+    def _comprehensive_prompt(self, summaries: dict, report_period: str,
+                              status: str, score: dict) -> str:
         """综合分析提示词（综合评价 + 体检建议）"""
         if not summaries.get("sleep_duration", {}).get("has_data"):
             return "暂无睡眠数据"
@@ -2190,6 +2500,7 @@ class PolarAnalysisAssistant:
 本报告聚焦睡眠时长、心率、呼吸三项指标。
 
 【用户信息】{self._person_desc()}
+【评分】{self._score_text(score)}
 【睡眠时长摘要】{json.dumps(summaries.get("sleep_duration", {}), ensure_ascii=False)}
 【夜间心率摘要】{json.dumps(summaries.get("heart_rate", {}), ensure_ascii=False)}
 【呼吸摘要】{json.dumps(summaries.get("breathing", {}), ensure_ascii=False)}
@@ -2204,9 +2515,10 @@ class PolarAnalysisAssistant:
 ## 体检建议
 给出 1-2 句体检建议，优先推荐与当前指标最相关的检查项目。
 
-输出要求：语气温暖积极，使用"您"称呼用户，不进行疾病诊断，禁止输出思考过程或 `<think>` 标签。"""
+输出要求：必须在综合评价中自然提及【评分】给出的综合评分（原样引用该分数，不得自行改动或重算）；语气温暖积极，使用"您"称呼用户，不进行疾病诊断，禁止输出思考过程或 `<think>` 标签。"""
 
-    def _sleep_prompt(self, summaries: dict, report_period: str, status: str) -> str:
+    def _sleep_prompt(self, summaries: dict, report_period: str,
+                      status: str, score: dict) -> str:
         sleep = summaries.get("sleep_duration", {})
         if not sleep.get("has_data"):
             return "暂无睡眠数据"
@@ -2214,6 +2526,7 @@ class PolarAnalysisAssistant:
         return f"""你是一名家庭健康助手。请基于以下睡眠监测数据，生成睡眠时长分析。
 
 【睡眠时长摘要】{json.dumps(sleep, ensure_ascii=False)}
+【评分】{self._score_text(score, "睡眠")}
 
 参考范围：成人建议睡眠时长 {lo:.0f}-{hi:.0f} 小时；深睡占比 15-25%；异常边界为低于 4 小时或高于 12 小时。
 
@@ -2223,7 +2536,8 @@ class PolarAnalysisAssistant:
 要求：先给出结论（{status}），再具体描述睡眠总时长、深睡与浅睡情况、睡眠评分与觉醒水平，最后给出 1 条改善建议。
 使用"您"称呼用户，自然语言叙述，不进行疾病诊断。"""
 
-    def _heart_rate_prompt(self, summaries: dict, report_period: str, status: str) -> str:
+    def _heart_rate_prompt(self, summaries: dict, report_period: str,
+                           status: str, score: dict) -> str:
         hr = summaries.get("heart_rate", {})
         if not hr.get("has_data"):
             return "暂无心率数据"
@@ -2231,6 +2545,7 @@ class PolarAnalysisAssistant:
         return f"""你是一名家庭健康助手。请基于以下夜间心率监测数据，生成心率分析。
 
 【夜间心率摘要】{json.dumps(hr, ensure_ascii=False)}
+【评分】{self._score_text(score, "心率")}
 
 参考范围：成人夜间/静息心率 {lo:.0f}-{hi:.0f} bpm。
 
@@ -2240,7 +2555,8 @@ class PolarAnalysisAssistant:
 要求：先给出结论（{status}），再描述夜间平均心率及其与参考范围的关系，最后给出 1 条建议。
 使用"您"称呼用户，不进行疾病诊断。"""
 
-    def _breathing_prompt(self, summaries: dict, report_period: str, status: str) -> str:
+    def _breathing_prompt(self, summaries: dict, report_period: str,
+                          status: str, score: dict) -> str:
         br = summaries.get("breathing", {})
         if not br.get("has_data"):
             return "暂无呼吸数据"
@@ -2248,6 +2564,7 @@ class PolarAnalysisAssistant:
         return f"""你是一名家庭健康助手。请基于以下夜间呼吸监测数据，生成呼吸分析。
 
 【呼吸摘要】{json.dumps(br, ensure_ascii=False)}
+【评分】{self._score_text(score, "呼吸")}
 
 参考范围：成人呼吸率 {lo:.0f}-{hi:.0f} 次/分。
 
@@ -2261,19 +2578,29 @@ class PolarAnalysisAssistant:
     # 分析入口
     # ------------------------------------------------------------------
 
-    def analyze_all(self, record: PolarSensorRecord, report_period: str) -> dict:
-        """并发分析极地项目睡眠传感器汇总数据，LLM 失败时自动降级为规则引擎"""
+    def analyze_all(self, records, report_period: str) -> dict:
+        """并发分析极地项目多日睡眠传感器数据，LLM 失败时自动降级为规则引擎
 
+        返回 {"analysis": 三大分析项, "score": 综合评分, "statuses": 结论标签,
+              "summaries": 多日汇总}；评分由规则引擎确定性算出后注入 Prompt，
+        保证生成的文案与分数一致。
+        """
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        summaries = PolarDataSummarizer.summarize(record)
+        records = list(records or [])
+        summaries = PolarMultiDaySummarizer.summarize(records)
         statuses = PolarRuleBasedAnalyzer.evaluate_status(summaries)
+        score = PolarScoreCalculator.compute(summaries, statuses)
 
         prompts = {
-            "comprehensive": (self._comprehensive_prompt(summaries, report_period, statuses["综合评价"]), 600),
-            "sleep": (self._sleep_prompt(summaries, report_period, statuses["睡眠分析"]), 400),
-            "heart_rate": (self._heart_rate_prompt(summaries, report_period, statuses["心率分析"]), 350),
-            "breathing": (self._breathing_prompt(summaries, report_period, statuses["呼吸分析"]), 350),
+            "comprehensive": (self._comprehensive_prompt(summaries, report_period,
+                                                         statuses["综合评价"], score), 600),
+            "sleep": (self._sleep_prompt(summaries, report_period,
+                                         statuses["睡眠分析"], score), 400),
+            "heart_rate": (self._heart_rate_prompt(summaries, report_period,
+                                                   statuses["心率分析"], score), 350),
+            "breathing": (self._breathing_prompt(summaries, report_period,
+                                                 statuses["呼吸分析"], score), 350),
         }
 
         def _call_llm(label: str, prompt: str, max_tokens: int) -> str:
@@ -2326,15 +2653,20 @@ class PolarAnalysisAssistant:
             summaries.get("breathing", {}), report_period)
 
         return {
-            "综合分析": {
-                "综合评价": {"标题": statuses["综合评价"], "内容": overall},
-                "体检建议": {"标题": "无", "内容": advice},
+            "analysis": {
+                "综合分析": {
+                    "综合评价": {"标题": statuses["综合评价"], "内容": overall},
+                    "体检建议": {"标题": "无", "内容": advice},
+                },
+                "睡眠分析": {"内容": sleep_text},
+                "心率呼吸分析": {
+                    "心率分析": {"标题": statuses["心率分析"], "内容": hr_text},
+                    "呼吸分析": {"标题": statuses["呼吸分析"], "内容": br_text},
+                },
             },
-            "睡眠分析": {"内容": sleep_text},
-            "心率呼吸分析": {
-                "心率分析": {"标题": statuses["心率分析"], "内容": hr_text},
-                "呼吸分析": {"标题": statuses["呼吸分析"], "内容": br_text},
-            },
+            "score": score,
+            "statuses": statuses,
+            "summaries": summaries,
         }
 
 
@@ -2452,12 +2784,10 @@ class HealthAnalysisRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# 极地项目请求模型（睡眠传感器上报的一条数据）
+# 极地项目请求模型（一个统计周期的多日睡眠传感器上报数据）
 # ---------------------------------------------------------------------------
-# 支持两种写法（可混用）：
-#   1）聚合式：projectId / personId / deviceId / collectTime + metrics 指标数组（推荐）；
-#   2）平铺式：上报的指标字段直接平铺在请求体顶层（兼容旧调用方）。
-# 键名兼容 camelCase 与 snake_case；数值字段兼容字符串数字。
+# 一个请求 = 一个统计周期；records 数组中每一条 = 一天的监测数据。
+# 键名兼容 camelCase 与 snake_case；metricValue 兼容字符串数字。
 
 POLAR_FIELD_DESCRIPTIONS = {
     "heartbeat": "设备心跳包：0异常 / 1正常",
@@ -2480,16 +2810,19 @@ POLAR_FIELD_DESCRIPTIONS = {
 
 
 class PolarAnalysisRequest(BaseModel):
-    """极地项目健康体检数据分析请求体——睡眠传感器上报的一条数据
+    """极地项目健康体检数据分析请求体——一个统计周期的多日睡眠传感器上报数据
 
-    聚合式写法（推荐）：上报元数据 + metrics 指标数组，例如
+    一个请求 = 一个统计周期；records 中每一条 = 一天的监测数据。例如
        {"projectId": "SIM_PROJECT_001", "personId": "8800000000000001",
-        "deviceId": "8001", "collectTime": "2026-10-12 06:30:00",
-        "metrics": [{"metricName": "sleepHours", "metricValue": "7.30"},
-                    {"metricName": "heartRateValue1", "metricValue": "64"},
-                    {"metricName": "breathValue1", "metricValue": "16"},
-                    {"metricName": "movementSigns1", "metricValue": "8"}]}
-    平铺式写法（兼容）：把指标字段直接放在顶层（heartbeat / breathValue / ...）。
+        "deviceId": "8001", "periodType": "week",
+        "periodStart": "2026-10-06", "periodEnd": "2026-10-12",
+        "records": [
+          {"collectTime": "2026-10-06 06:28:00",
+           "metrics": [{"metricName": "sleepHours", "metricValue": "7.10"},
+                       {"metricName": "deepSleepHours", "metricValue": "1.80"},
+                       {"metricName": "heartRateValue1", "metricValue": "62"},
+                       {"metricName": "breathValue1", "metricValue": "15"}]},
+          ...]}
     """
 
     model_config = ConfigDict(populate_by_name=True)
@@ -2501,53 +2834,88 @@ class PolarAnalysisRequest(BaseModel):
                                      description="人员编码")
     device_id: Optional[Any] = Field(default=None, alias="deviceId",
                                      description="设备编码")
-    collect_time: Optional[Any] = Field(default=None, alias="collectTime",
-                                        description="采集时间，如 2026-10-12 06:30:00")
 
-    # —— 指标数组 ——
-    metrics: Optional[list] = Field(
-        default=None,
-        description="指标数组 [{metricName, metricValue}]。同一指标多次上报取平均，"
+    # —— 统计周期 ——
+    period_type: Optional[Any] = Field(
+        default=None, alias="periodType",
+        description="统计周期类型：day / week / month / quarter / year")
+    period_start: Optional[Any] = Field(default=None, alias="periodStart",
+                                        description="统计起始日期，YYYY-MM-DD")
+    period_end: Optional[Any] = Field(default=None, alias="periodEnd",
+                                      description="统计结束日期，YYYY-MM-DD")
+
+    # —— 逐日监测记录 ——
+    records: Optional[list] = Field(
+        default=None, alias="records",
+        description="逐日监测记录数组，元素为 {collectTime, metrics}。"
+                    "metrics 为 [{metricName, metricValue}]；同一指标多次上报取平均，"
                     "尾部采集序号（如 heartRateValue1 / heartRateValue2）自动剥离；"
-                    "metricName 支持 sleepHours / heartRateValue / breathValue / "
-                    "movementSigns / deepSleepDuration / sleepScore / breathe_alarm 等")
+                    "metricName 支持 sleepHours / deepSleepHours / lightSleepHours / "
+                    "awakeHours / heartRateValue / breathValue / movementSigns / "
+                    "sleepScore / abnormalSleep / breathe_alarm / bedoff_alarm 等")
 
     person: Optional[dict] = Field(default=None, description="人员基础信息，可选，单条 JSON 对象")
 
-    heartbeat: Optional[Any] = Field(default=None, alias="heartbeat",
-                                     description=POLAR_FIELD_DESCRIPTIONS["heartbeat"])
-    someone_exists: Optional[Any] = Field(default=None, alias="someoneExists",
-                                          description=POLAR_FIELD_DESCRIPTIONS["someoneExists"])
-    movement_signs: Optional[Any] = Field(default=None, alias="movementSigns",
-                                          description=POLAR_FIELD_DESCRIPTIONS["movementSigns"])
-    breath_value: Optional[Any] = Field(default=None, alias="breathValue",
-                                        description=POLAR_FIELD_DESCRIPTIONS["breathValue"])
-    heart_rate_value: Optional[Any] = Field(default=None, alias="heartRateValue",
-                                            description=POLAR_FIELD_DESCRIPTIONS["heartRateValue"])
-    sleep_status: Optional[Any] = Field(default=None, alias="sleepStatus",
-                                        description=POLAR_FIELD_DESCRIPTIONS["sleepStatus"])
-    get_into_bed: Optional[Any] = Field(default=None, alias="getIntoBed",
-                                        description=POLAR_FIELD_DESCRIPTIONS["getIntoBed"])
-    awake_duration: Optional[Any] = Field(default=None, alias="awakeDuration",
-                                          description=POLAR_FIELD_DESCRIPTIONS["awakeDuration"])
-    light_sleep_duration: Optional[Any] = Field(default=None, alias="lightSleepDuration",
-                                                description=POLAR_FIELD_DESCRIPTIONS["lightSleepDuration"])
-    deep_sleep_duration: Optional[Any] = Field(default=None, alias="deepSleepDuration",
-                                               description=POLAR_FIELD_DESCRIPTIONS["deepSleepDuration"])
-    sleep_score: Optional[Any] = Field(default=None, alias="sleepScore",
-                                       description=POLAR_FIELD_DESCRIPTIONS["sleepScore"])
-    sleep_comprehensive_status: Optional[Any] = Field(
-        default=None, alias="sleepComprehensiveStatus",
-        description=POLAR_FIELD_DESCRIPTIONS["sleepComprehensiveStatus"])
-    sleep_quality_analysis: Optional[Any] = Field(
-        default=None, alias="sleepQualityAnalysis",
-        description=POLAR_FIELD_DESCRIPTIONS["sleepQualityAnalysis"])
-    abnormal_sleep: Optional[Any] = Field(default=None, alias="abnormalSleep",
-                                          description=POLAR_FIELD_DESCRIPTIONS["abnormalSleep"])
-    breathe_alarm: Optional[Any] = Field(default=None,
-                                         description=POLAR_FIELD_DESCRIPTIONS["breathe_alarm"])
-    bedoff_alarm: Optional[Any] = Field(default=None,
-                                        description=POLAR_FIELD_DESCRIPTIONS["bedoff_alarm"])
+
+def _polar_text(value) -> str:
+    """把需要回显的元数据统一转成字符串（None / 空值 -> 空串）"""
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _polar_collect_date(collect_time: str) -> str:
+    """从采集时间中取出日期部分（YYYY-MM-DD），取不到返回空串"""
+    if not collect_time:
+        return ""
+    head = collect_time.strip()[:10]
+    return head if re.fullmatch(r"\d{4}-\d{2}-\d{2}", head) else ""
+
+
+def _polar_parse_records(items):
+    """把 records 数组解析成 (逐日记录列表, 总条数, 有效条数)
+
+    每条 record 形如 {collectTime, metrics:[{metricName, metricValue}]}；
+    有效 = 该条至少解析出睡眠时长、夜间心率或呼吸之一。
+    """
+    records, total = [], 0
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        total += 1
+        raw = _polar_metrics_to_raw(_get(item, "metrics", "Metrics"))
+        records.append(_parse_polar_sensor(raw))
+
+    valid = sum(
+        1 for r in records
+        if r.sleep_total_hours is not None
+        or r.avg_heart_rate is not None
+        or r.avg_breathing_rate is not None
+    )
+    return records, total, valid
+
+
+def _polar_report_text(period_type, period_start, period_end) -> str:
+    """生成报告周期文案：周期类型为主，起止日期为辅
+
+    例：periodType=week + 2026-10-06~2026-10-12 -> "近一周（2026-10-06 至 2026-10-12）"
+    注意：文案不要自带"数据"二字，降级模板会拼接成"结合{周期}数据"。
+    """
+    label = ""
+    if period_type is not None and str(period_type).strip() != "":
+        token = re.sub(r"[^0-9a-z]", "", str(period_type).lower())
+        label = POLAR_PERIOD_TYPE_LABELS.get(token, "")
+
+    start = _polar_collect_date(_polar_text(period_start))
+    end = _polar_collect_date(_polar_text(period_end))
+    if start and end and start != end:
+        span = f"{start} 至 {end}"
+    else:
+        span = start or end
+
+    if label and span:
+        return f"{label}（{span}）"
+    return label or span or POLAR_PERIOD_TEXT
 
 
 # ---------------------------------------------------------------------------
@@ -2667,22 +3035,6 @@ async def list_persons():
 
 
 # 请求体中的元数据字段：不参与指标解析，只用于原样回显
-POLAR_META_FIELDS = ("person", "metrics", "project_id", "person_id", "device_id", "collect_time")
-
-
-def _polar_text(value) -> str:
-    """把需要回显的元数据统一转成字符串（None / 空值 -> 空串）"""
-    if value is None:
-        return ""
-    return str(value).strip()
-
-
-def _polar_collect_date(collect_time: str) -> str:
-    """从采集时间中取出日期部分（YYYY-MM-DD），取不到返回空串"""
-    if not collect_time:
-        return ""
-    head = collect_time.strip()[:10]
-    return head if re.fullmatch(r"\d{4}-\d{2}-\d{2}", head) else ""
 
 
 @app.post("/v1/health/polar/analyze")
@@ -2690,55 +3042,50 @@ async def polar_health_analyze(request: PolarAnalysisRequest):
     """
     极地项目健康体检数据 AI 分析接口（阻塞式）。
 
-    请求体为睡眠传感器上报的一条数据，支持两种写法（可混用）：
-      1）聚合式：projectId / personId / deviceId / collectTime + metrics 指标数组；
-      2）平铺式：指标字段直接平铺在顶层（兼容旧调用方）。
+    请求体 = 一个统计周期的多日睡眠传感器上报数据：
+      projectId / personId / deviceId / periodType / periodStart / periodEnd /
+      records[{collectTime, metrics[{metricName, metricValue}]}]
 
     聚焦睡眠时长、夜间心率、呼吸三项核心指标，返回：
-      上报元数据（projectId / personId / deviceId / collectTime）、
-      结论速览（conclusion）、以及完整分析（综合分析 / 睡眠分析 / 心率呼吸分析）。
+      上报元数据与周期回显、综合评分（score）、结论速览（conclusion）、
+      完整分析（综合分析 / 睡眠分析 / 心率呼吸分析）。
     """
     person = _parse_person(request.person) if request.person else None
 
-    # 平铺字段（显式传入，优先级更高）与 metrics 指标数组归并
-    flat = {
-        k: v for k, v in request.model_dump(by_alias=False,
-                                            exclude=set(POLAR_META_FIELDS)).items()
-        if v is not None
-    }
-    merged = _polar_metrics_to_raw(request.metrics)
-    merged.update(flat)
-
-    record = _parse_polar_sensor(merged)
-
-    collect_time = _polar_text(request.collect_time) or _polar_text(merged.get("collectTime"))
-    collect_date = _polar_collect_date(collect_time)
-    report_period = f"{collect_date} 监测" if collect_date else POLAR_PERIOD_TEXT
+    records, record_count, valid_count = _polar_parse_records(request.records)
+    report_period = _polar_report_text(request.period_type,
+                                       request.period_start, request.period_end)
 
     provider = get_provider()
     assistant = PolarAnalysisAssistant(provider, person)
 
     try:
-        analysis = await asyncio.to_thread(assistant.analyze_all, record, report_period)
+        result = await asyncio.to_thread(assistant.analyze_all, records, report_period)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"分析失败: {e}")
 
-    statuses = PolarRuleBasedAnalyzer.evaluate_status(PolarDataSummarizer.summarize(record))
+    statuses = result.get("statuses") or {}
+    score = result.get("score") or {}
 
     return {
         "projectId": _polar_text(request.project_id),
         "personId": _polar_text(request.person_id) or (
             (person.id_card or person.id) if person else ""),
         "deviceId": _polar_text(request.device_id) or (person.device_id if person else ""),
-        "collectTime": collect_time,
+        "periodType": _polar_text(request.period_type),
+        "periodStart": _polar_text(request.period_start),
+        "periodEnd": _polar_text(request.period_end),
+        "recordCount": record_count,
+        "validRecordCount": valid_count,
         "reportPeriod": report_period,
+        "score": score,
         "conclusion": {
-            "综合评价": statuses["综合评价"],
-            "睡眠分析": statuses["睡眠分析"],
-            "心率分析": statuses["心率分析"],
-            "呼吸分析": statuses["呼吸分析"],
+            "综合评价": statuses.get("综合评价", ""),
+            "睡眠分析": statuses.get("睡眠分析", ""),
+            "心率分析": statuses.get("心率分析", ""),
+            "呼吸分析": statuses.get("呼吸分析", ""),
         },
-        "analysis": analysis,
+        "analysis": result.get("analysis") or {},
     }
 
 
