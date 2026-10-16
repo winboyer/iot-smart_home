@@ -1,0 +1,94 @@
+{
+  "projectId": "SIM_PROJECT_001",
+  "personId": "8800000000000001",
+  "deviceId": "8001",
+  "periodType": "week",
+  "periodStart": "2026-10-06",
+  "periodEnd": "2026-10-12",
+  "records": [
+    {
+      "collectTime": "2026-10-06 06:28:00",
+      "metrics": [
+        { "metricName": "sleepHours", "metricValue": "7.10" },
+        { "metricName": "deepSleepHours", "metricValue": "1.80" },
+        { "metricName": "lightSleepHours", "metricValue": "5.30" },
+        { "metricName": "awakeHours", "metricValue": "0.35" },
+        { "metricName": "heartRateValue1", "metricValue": "62" },
+        { "metricName": "breathValue1", "metricValue": "15" },
+        { "metricName": "movementSigns1", "metricValue": "6" }
+      ]
+    },
+    {
+      "collectTime": "2026-10-07 06:35:00",
+      "metrics": [
+        { "metricName": "sleepHours", "metricValue": "6.80" },
+        { "metricName": "deepSleepHours", "metricValue": "1.50" },
+        { "metricName": "lightSleepHours", "metricValue": "5.30" },
+        { "metricName": "awakeHours", "metricValue": "0.55" },
+        { "metricName": "heartRateValue1", "metricValue": "66" },
+        { "metricName": "breathValue1", "metricValue": "17" },
+        { "metricName": "movementSigns1", "metricValue": "9" }
+      ]
+    },
+    {
+      "collectTime": "2026-10-08 06:22:00",
+      "metrics": [
+        { "metricName": "sleepHours", "metricValue": "7.60" },
+        { "metricName": "deepSleepHours", "metricValue": "2.10" },
+        { "metricName": "lightSleepHours", "metricValue": "5.50" },
+        { "metricName": "awakeHours", "metricValue": "0.25" },
+        { "metricName": "heartRateValue1", "metricValue": "61" },
+        { "metricName": "breathValue1", "metricValue": "15" },
+        { "metricName": "movementSigns1", "metricValue": "5" }
+      ]
+    },
+    {
+      "collectTime": "2026-10-09 06:41:00",
+      "metrics": [
+        { "metricName": "sleepHours", "metricValue": "6.40" },
+        { "metricName": "deepSleepHours", "metricValue": "1.20" },
+        { "metricName": "lightSleepHours", "metricValue": "5.20" },
+        { "metricName": "awakeHours", "metricValue": "0.80" },
+        { "metricName": "heartRateValue1", "metricValue": "70" },
+        { "metricName": "breathValue1", "metricValue": "18" },
+        { "metricName": "movementSigns1", "metricValue": "11" }
+      ]
+    },
+    {
+      "collectTime": "2026-10-10 06:18:00",
+      "metrics": [
+        { "metricName": "sleepHours", "metricValue": "7.90" },
+        { "metricName": "deepSleepHours", "metricValue": "2.30" },
+        { "metricName": "lightSleepHours", "metricValue": "5.60" },
+        { "metricName": "awakeHours", "metricValue": "0.20" },
+        { "metricName": "heartRateValue1", "metricValue": "60" },
+        { "metricName": "breathValue1", "metricValue": "14" },
+        { "metricName": "movementSigns1", "metricValue": "4" }
+      ]
+    },
+    {
+      "collectTime": "2026-10-11 06:33:00",
+      "metrics": [
+        { "metricName": "sleepHours", "metricValue": "7.20" },
+        { "metricName": "deepSleepHours", "metricValue": "1.70" },
+        { "metricName": "lightSleepHours", "metricValue": "5.50" },
+        { "metricName": "awakeHours", "metricValue": "0.40" },
+        { "metricName": "heartRateValue1", "metricValue": "65" },
+        { "metricName": "breathValue1", "metricValue": "16" },
+        { "metricName": "movementSigns1", "metricValue": "7" }
+      ]
+    },
+    {
+      "collectTime": "2026-10-12 06:30:00",
+      "metrics": [
+        { "metricName": "sleepHours", "metricValue": "7.30" },
+        { "metricName": "deepSleepHours", "metricValue": "1.90" },
+        { "metricName": "lightSleepHours", "metricValue": "5.40" },
+        { "metricName": "awakeHours", "metricValue": "0.45" },
+        { "metricName": "heartRateValue1", "metricValue": "64" },
+        { "metricName": "breathValue1", "metricValue": "16" },
+        { "metricName": "movementSigns1", "metricValue": "8" }
+      ]
+    }
+  ]
+}
